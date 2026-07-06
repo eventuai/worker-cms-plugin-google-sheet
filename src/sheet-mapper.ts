@@ -5,8 +5,19 @@ const READONLY_COLUMNS = new Set(['updated_at']);
 
 type FlatLect = Record<string, string>;
 
-export function pagesToSheetValues(pages: CmsPage[], language: string): string[][] {
+export function sheetColumnsForPages(pages: CmsPage[], language: string): string[] {
   const rows = pages.map((page) => pageToRow(page, language));
+  return columnsForRows(rows);
+}
+
+export function pagesToSheetValues(pages: CmsPage[], language: string, selectedColumns?: string[]): string[][] {
+  const rows = pages.map((page) => pageToRow(page, language));
+  const allColumns = columnsForRows(rows);
+  const columns = selectedSheetColumns(allColumns, selectedColumns);
+  return [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+}
+
+function columnsForRows(rows: Array<Record<string, string>>): string[] {
   const columns = [...BASE_COLUMNS];
   const seen = new Set(columns);
   for (const row of rows) {
@@ -17,7 +28,20 @@ export function pagesToSheetValues(pages: CmsPage[], language: string): string[]
       }
     }
   }
-  return [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+  return columns;
+}
+
+function selectedSheetColumns(allColumns: string[], selectedColumns: string[] | undefined): string[] {
+  if (!selectedColumns) return allColumns;
+  const allowed = new Set(allColumns);
+  const columns: string[] = [];
+  const seen = new Set<string>();
+  for (const column of ['id', ...selectedColumns]) {
+    if (!allowed.has(column) || seen.has(column)) continue;
+    seen.add(column);
+    columns.push(column);
+  }
+  return columns.length ? columns : ['id'];
 }
 
 export function sheetValuesToUpdates(values: string[][], defaultPageType: string, language: string): Array<{

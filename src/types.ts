@@ -53,11 +53,14 @@ export interface SyncRequest {
   spreadsheetId: string;
   pageTypes: string[];
   language: string;
+  pluginHost: string;
   limit: number;
   criteria: SyncCriterion[];
   operator: SyncOperator;
   sort: SyncSort;
   order: SyncOrder;
+  selectedColumns?: Record<string, string[]>;
+  sheetValues?: Record<string, string[][]>;
 }
 
 export type SyncOperator = 'AND' | 'OR' | 'NOT';
@@ -76,6 +79,10 @@ export interface SyncResult {
   pageTypes: Array<{ pageType: string; total: number; exported: number; columns: number }>;
 }
 
+export interface SyncPreviewResult {
+  pageTypes: Array<{ pageType: string; total: number; exported: number; columns: string[] }>;
+}
+
 export interface ImportResult {
   spreadsheetId: string;
   spreadsheetUrl: string;
@@ -90,4 +97,7 @@ export interface SheetCallbackPayload {
   sheetName?: unknown;
   language?: unknown;
   limit?: unknown;
+  headers?: unknown;
+  rows?: unknown;
+  values?: unknown;
 }

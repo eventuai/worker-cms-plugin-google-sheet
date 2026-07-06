@@ -1,8 +1,8 @@
 import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
 import { filterAndSortPages, parseCriteria, parseOperator, parseOrder, parseSort } from './search';
-import { pagesToSheetValues, sheetValuesToUpdates } from './sheet-mapper';
-import type { CmsUser, ImportResult, PluginEnv, SheetCallbackPayload, SyncRequest, SyncResult } from './types';
+import { pagesToSheetValues, sheetColumnsForPages, sheetValuesToUpdates } from './sheet-mapper';
+import type { CmsUser, ImportResult, PluginEnv, SheetCallbackPayload, SyncPreviewResult, SyncRequest, SyncResult } from './types';
 
 const PLUGIN_ID = 'google-sheet';
 const ADMIN_SCRIPT_ASSET = '/assets/sheet-sync-admin.js';
@@ -89,9 +89,13 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
     const cms = new CmsClient(env, user.id ?? null);
     const sheets = new GoogleSheetsClient(env);
 
+    if (action === 'preview') {
+      const result = await previewExport(cms, sync);
+      return chrome('Google Sheets preview', resultView('Preview export columns', previewView(sync, result)));
+    }
     if (action === 'export') {
       const result = await exportToSheet(cms, sheets, sync);
-      return chrome('Google Sheets export', resultView('Export complete', exportSummary(result)));
+      return chrome('Google Sheets export', resultView('Export complete', exportSummary(result, sync, env)));
     }
     if (action === 'import') {
       const result = await importFromSheet(cms, sheets, sync);
@@ -101,6 +105,21 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
   }
 
   return clientView('Google Sheets', '/templates/sync.json', syncViewData(env, url.searchParams));
+}
+
+async function previewExport(cms: CmsClient, sync: SyncRequest): Promise<SyncPreviewResult> {
+  const results: SyncPreviewResult['pageTypes'] = [];
+  for (const pageType of sync.pageTypes) {
+    const allPages = await cms.listAll(pageType, sync.limit);
+    const pages = filterAndSortPages(allPages, sync.criteria, sync.operator, sync.sort, sync.order);
+    results.push({
+      pageType,
+      total: allPages.length,
+      exported: pages.length,
+      columns: sheetColumnsForPages(pages, sync.language),
+    });
+  }
+  return { pageTypes: results };
 }
 
 async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: SyncRequest): Promise<SyncResult> {
@@ -113,7 +132,7 @@ async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: S
   for (const pageType of sync.pageTypes) {
     const allPages = await cms.listAll(pageType, sync.limit);
     const pages = filterAndSortPages(allPages, sync.criteria, sync.operator, sync.sort, sync.order);
-    const values = pagesToSheetValues(pages, sync.language);
+    const values = pagesToSheetValues(pages, sync.language, sync.selectedColumns?.[pageType]);
     await sheets.writeValues(spreadsheetId, sheetTitleFor(pageType), values);
     results.push({ pageType, total: allPages.length, exported: pages.length, columns: values[0]?.length ?? 0 });
   }
@@ -126,7 +145,7 @@ async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync:
 
   const results: ImportResult['pageTypes'] = [];
   for (const pageType of sync.pageTypes) {
-    const values = await sheets.readValues(sync.spreadsheetId, sheetTitleFor(pageType));
+    const values = sync.sheetValues?.[pageType] ?? await sheets.readValues(sync.spreadsheetId, sheetTitleFor(pageType));
     const updates = sheetValuesToUpdates(values, pageType, sync.language);
     let updated = 0;
     let skipped = 0;
@@ -167,11 +186,13 @@ function syncRequestFromForm(form: FormData, env: PluginEnv): SyncRequest {
     spreadsheetId: spreadsheetIdFromInput(String(form.get('spreadsheet_id') ?? '')),
     pageTypes,
     language: String(form.get('language') ?? env.DEFAULT_LANGUAGE ?? 'en').trim() || 'en',
+    pluginHost: String(form.get('plugin_host') ?? '').trim(),
     limit: Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 500,
     criteria: parseCriteria(form),
     operator: parseOperator(form.get('operator')),
     sort: parseSort(form.get('sort')),
     order: parseOrder(form.get('order')),
+    selectedColumns: selectedColumnsFromForm(form, pageTypes),
   };
 }
 
@@ -182,21 +203,57 @@ function syncRequestFromCallback(payload: SheetCallbackPayload | null, env: Plug
   const spreadsheetId = spreadsheetIdFromInput(String(payload.spreadsheetId ?? ''));
   if (!spreadsheetId) throw new GoogleSheetsError('Callback payload must include spreadsheetId.', 400);
   const limit = Number(payload.limit ?? 500);
+  const sheetValues = callbackSheetValues(payload);
   return {
     spreadsheetId,
     pageTypes,
     language: String(payload.language ?? env.DEFAULT_LANGUAGE ?? 'en').trim() || 'en',
+    pluginHost: '',
     limit: Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 500,
     criteria: [],
     operator: 'AND',
     sort: 'updated_at',
     order: 'DESC',
+    sheetValues: sheetValues ? { [pageTypes[0]]: sheetValues } : undefined,
   };
+}
+
+function callbackSheetValues(payload: SheetCallbackPayload): string[][] | undefined {
+  const headers = stringRow(payload.headers);
+  const rows = stringRows(payload.rows ?? payload.values);
+  if (!headers.length || !rows.length) return undefined;
+  return [headers, ...rows];
+}
+
+function stringRows(value: unknown): string[][] {
+  if (!Array.isArray(value)) return [];
+  if (!value.length) return [];
+  if (Array.isArray(value[0])) {
+    return value.map((row) => stringRow(row)).filter((row) => row.some((cell) => cell.trim() !== ''));
+  }
+  const row = stringRow(value);
+  return row.some((cell) => cell.trim() !== '') ? [row] : [];
+}
+
+function stringRow(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((cell) => String(cell ?? ''));
+}
+
+function selectedColumnsFromForm(form: FormData, pageTypes: string[]): Record<string, string[]> | undefined {
+  if (String(form.get('columns_configured') ?? '') !== '1') return undefined;
+  const selected: Record<string, string[]> = {};
+  for (const pageType of pageTypes) {
+    const columns = form.getAll(`column:${pageType}`)
+      .map((value) => typeof value === 'string' ? value.trim() : '')
+      .filter(Boolean);
+    selected[pageType] = [...new Set(['id', ...columns])];
+  }
+  return selected;
 }
 
 function syncViewData(env: PluginEnv, params: URLSearchParams): Record<string, unknown> {
   const pageTypes = params.get('page_types') || configuredPageTypes(env).join(', ');
-  const language = params.get('language') || env.DEFAULT_LANGUAGE || 'en';
   const spreadsheetId = params.get('spreadsheet_id') || '';
   const operator = params.get('operator') || 'AND';
   const sort = params.get('sort') || 'updated_at';
@@ -208,14 +265,11 @@ function syncViewData(env: PluginEnv, params: URLSearchParams): Record<string, u
     callbackReady: !!env.SHEET_WEBHOOK_SECRET,
     spreadsheetId,
     pageTypes,
-    language,
     pluginHost,
     webhookSecret: env.SHEET_WEBHOOK_SECRET ?? '',
     appScriptCode: appsScriptTemplate({
       pluginHost: pluginHost || 'https://YOUR_PLUGIN_HOST',
       webhookSecret: env.SHEET_WEBHOOK_SECRET || 'YOUR_SHEET_WEBHOOK_SECRET',
-      pageTypes,
-      language,
     }),
     operatorOptions: options(['AND', 'OR', 'NOT'], operator),
     sortOptions: options(['updated_at', 'created_at', 'name', 'weight', 'id'], sort, {
@@ -273,7 +327,7 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
       <div class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><span class="font-semibold">Callback disabled.</span> Set SHEET_WEBHOOK_SECRET before wiring Google Apps Script edit triggers.</div>
     {% endunless %}
 
-    <form method="post" class="max-w-5xl space-y-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <form id="sheet-sync-form" method="post" class="max-w-5xl space-y-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
       <label class="block">
         <span class="block text-sm font-medium text-gray-700 mb-1">Spreadsheet ID or URL</span>
         <input name="spreadsheet_id" value="{{ spreadsheetId | escape }}" placeholder="Leave blank to create a new spreadsheet"
@@ -286,18 +340,11 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
           class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
       </label>
 
-      <div class="grid gap-4 sm:grid-cols-2">
-        <label class="block">
-          <span class="block text-sm font-medium text-gray-700 mb-1">Language</span>
-          <input name="language" value="{{ language | escape }}" data-sheet-language
-            class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
-        </label>
-        <label class="block">
-          <span class="block text-sm font-medium text-gray-700 mb-1">Page fetch size</span>
-          <input type="number" min="1" max="500" name="limit" value="500"
-            class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
-        </label>
-      </div>
+      <label class="block">
+        <span class="block text-sm font-medium text-gray-700 mb-1">Page fetch size</span>
+        <input type="number" min="1" max="500" name="limit" value="500"
+          class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+      </label>
 
       <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_8rem_8rem] md:items-end">
         <label class="block">
@@ -339,9 +386,9 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
       </div>
 
       <div class="flex flex-wrap items-center gap-3 pt-2">
-        <button type="submit" name="action" value="export"
+        <button type="submit" name="action" value="preview"
           class="inline-flex h-10 items-center justify-center rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white hover:bg-indigo-700">
-          Export to Sheet
+          Preview
         </button>
         <button type="submit" name="action" value="import"
           class="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50">
@@ -357,7 +404,7 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
       </div>
       <label class="mb-4 block">
         <span class="block text-sm font-medium text-gray-700 mb-1">Plugin host</span>
-        <input value="{{ pluginHost | escape }}" placeholder="https://worker-cms-plugin-google-sheet.example.workers.dev" data-sheet-plugin-host
+        <input name="plugin_host" form="sheet-sync-form" value="{{ pluginHost | escape }}" placeholder="https://worker-cms-plugin-google-sheet.example.workers.dev" data-sheet-plugin-host
           class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
       </label>
       <p class="mb-3 text-xs text-gray-500">The webhook secret is already inserted from SHEET_WEBHOOK_SECRET. Approve this plugin's admin asset before expecting the preview to update while typing.</p>
@@ -378,11 +425,72 @@ function resultView(title: string, body: string): string {
   </div>`;
 }
 
-function exportSummary(result: SyncResult): string {
+function exportSummary(result: SyncResult, sync: SyncRequest, env: PluginEnv): string {
+  const appScriptCode = appsScriptTemplate({
+    pluginHost: sync.pluginHost || 'https://YOUR_PLUGIN_HOST',
+    webhookSecret: env.SHEET_WEBHOOK_SECRET || 'YOUR_SHEET_WEBHOOK_SECRET',
+  });
   return `<div class="space-y-4">
     ${notice('Spreadsheet ready', `<a class="font-semibold text-indigo-700 hover:text-indigo-900" href="${esc(result.spreadsheetUrl)}">${esc(result.spreadsheetId)}</a>`, 'green')}
+    ${copyField('Published sheet URL', result.spreadsheetUrl)}
+    ${copyCodeBlock('Apps Script callback', appScriptCode)}
     ${summaryTable(['Page type', 'Fetched', 'Exported', 'Columns'], result.pageTypes.map((item) => [item.pageType, String(item.total), String(item.exported), String(item.columns)]))}
   </div>`;
+}
+
+function previewView(sync: SyncRequest, result: SyncPreviewResult): string {
+  return `<form method="post" class="space-y-4">
+    ${hiddenSyncFields(sync)}
+    <input type="hidden" name="columns_configured" value="1">
+    ${result.pageTypes.map((item) => columnPicker(item)).join('')}
+    <div class="flex flex-wrap items-center gap-3 pt-2">
+      <button type="submit" name="action" value="export"
+        class="inline-flex h-10 items-center justify-center rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white hover:bg-indigo-700">
+        Export selected columns
+      </button>
+      <a href="/admin/plugins/${PLUGIN_ID}/sync" class="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50">Back</a>
+    </div>
+  </form>`;
+}
+
+function columnPicker(item: SyncPreviewResult['pageTypes'][number]): string {
+  return `<div class="rounded-xl border border-gray-200 bg-white shadow-sm">
+    <div class="border-b border-gray-100 px-4 py-3">
+      <h2 class="text-lg font-bold text-gray-900">${esc(item.pageType)}</h2>
+      <p class="mt-1 text-sm text-gray-500">${item.exported} of ${item.total} pages matched, ${item.columns.length} columns available.</p>
+    </div>
+    <div class="grid gap-2 p-4 sm:grid-cols-2 lg:grid-cols-3">
+      ${item.columns.map((column) => columnCheckbox(item.pageType, column)).join('')}
+    </div>
+  </div>`;
+}
+
+function columnCheckbox(pageType: string, column: string): string {
+  const required = column === 'id';
+  const name = `column:${pageType}`;
+  return `<label class="flex min-w-0 items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
+    <input type="checkbox" name="${esc(name)}" value="${esc(column)}" checked ${required ? 'disabled' : ''}
+      class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+    ${required ? `<input type="hidden" name="${esc(name)}" value="${esc(column)}">` : ''}
+    <span class="min-w-0 truncate">${esc(column)}</span>
+  </label>`;
+}
+
+function hiddenSyncFields(sync: SyncRequest): string {
+  const fields: Array<[string, string]> = [
+    ['spreadsheet_id', sync.spreadsheetId],
+    ['page_types', sync.pageTypes.join(', ')],
+    ['language', sync.language],
+    ['plugin_host', sync.pluginHost],
+    ['limit', String(sync.limit)],
+    ['operator', sync.operator],
+    ['sort', sync.sort],
+    ['order', sync.order],
+  ];
+  for (const criterion of sync.criteria) {
+    fields.push([`search${criterion.index}`, criterion.term], [`path${criterion.index}`, criterion.path]);
+  }
+  return fields.map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`).join('');
 }
 
 function importSummary(result: ImportResult): string {
@@ -408,6 +516,22 @@ function summaryTable(headers: string[], rows: string[][]): string {
       <tbody class="divide-y divide-gray-100">${rows.map((row) => `<tr>${row.map((cell) => `<td class="px-4 py-3 text-sm text-gray-700">${cell ? esc(cell) : '<span class="text-gray-400">-</span>'}</td>`).join('')}</tr>`).join('')}</tbody>
     </table>
   </div>`;
+}
+
+function copyField(label: string, value: string): string {
+  return `<label class="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <span class="mb-2 block text-sm font-semibold text-gray-900">${esc(label)}</span>
+    <input readonly value="${esc(value)}"
+      class="block min-w-0 w-full max-w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+  </label>`;
+}
+
+function copyCodeBlock(label: string, value: string): string {
+  return `<label class="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <span class="mb-2 block text-sm font-semibold text-gray-900">${esc(label)}</span>
+    <textarea readonly rows="18"
+      class="block min-h-[22rem] w-full resize-y rounded-lg border border-gray-300 bg-gray-900 p-4 font-mono text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">${esc(value)}</textarea>
+  </label>`;
 }
 
 function notice(title: string, message: string, tone: 'green' | 'amber'): string {
@@ -511,13 +635,13 @@ function configuredPageTypes(env: PluginEnv): string[] {
 }
 
 function callbackPageTypes(payload: SheetCallbackPayload): string[] | null {
+  if (typeof payload.pageType === 'string' && payload.pageType.trim()) return [payload.pageType.trim()];
+  if (typeof payload.sheetName === 'string' && payload.sheetName.trim()) return [payload.sheetName.trim()];
   if (Array.isArray(payload.pageTypes)) {
     const types = payload.pageTypes.map((value) => String(value).trim()).filter(Boolean);
     return types.length ? [...new Set(types)] : null;
   }
   if (typeof payload.pageTypes === 'string') return parsePageTypes(payload.pageTypes);
-  if (typeof payload.pageType === 'string' && payload.pageType.trim()) return [payload.pageType.trim()];
-  if (typeof payload.sheetName === 'string' && payload.sheetName.trim()) return [payload.sheetName.trim()];
   return null;
 }
 
@@ -537,25 +661,36 @@ function esc(value: unknown): string {
   return String(value ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch] as string));
 }
 
-function appsScriptTemplate(opts: { pluginHost: string; webhookSecret: string; pageTypes: string; language: string }): string {
+function appsScriptTemplate(opts: { pluginHost: string; webhookSecret: string }): string {
   const host = opts.pluginHost.replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
   return `const CMS_PLUGIN_CALLBACK_URL = '${jsString(`${host}/__plugin/sheets/callback`)}';
 const CMS_PLUGIN_WEBHOOK_SECRET = '${jsString(opts.webhookSecret)}';
-const CMS_PLUGIN_PAGE_TYPES = '${jsString(opts.pageTypes)}';
-const CMS_PLUGIN_LANGUAGE = '${jsString(opts.language)}';
 
 function onCmsSheetEdit(e) {
   const spreadsheet = SpreadsheetApp.getActive();
-  const sheetName = e && e.range ? e.range.getSheet().getName() : '';
+  const range = e && e.range;
+  if (!range) return;
+  const sheet = range.getSheet();
+  const firstRow = range.getRow();
+  const rowCount = range.getNumRows();
+  const firstDataRow = Math.max(firstRow, 2);
+  const changedRowCount = Math.max(0, firstRow + rowCount - firstDataRow);
+  if (!changedRowCount) return;
+  const lastColumn = sheet.getLastColumn();
+  if (!lastColumn) return;
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(function (value) { return String(value || '').trim(); });
+  const rows = sheet.getRange(firstDataRow, 1, changedRowCount, lastColumn).getValues();
   UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {
     method: 'post',
     contentType: 'application/json',
     headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_WEBHOOK_SECRET },
     payload: JSON.stringify({
       spreadsheetId: spreadsheet.getId(),
-      pageTypes: CMS_PLUGIN_PAGE_TYPES ? CMS_PLUGIN_PAGE_TYPES.split(',').map(function (value) { return value.trim(); }).filter(Boolean) : undefined,
-      sheetName: sheetName,
-      language: CMS_PLUGIN_LANGUAGE
+      pageType: sheet.getName(),
+      sheetName: sheet.getName(),
+      headers: headers,
+      rows: rows,
+      rowNumbers: rows.map(function (_, index) { return firstDataRow + index; })
     }),
     muteHttpExceptions: true
   });
@@ -567,28 +702,58 @@ function jsString(value: string): string {
 }
 
 const ADMIN_SCRIPT = String.raw`(function () {
+  var HOST_STORAGE_KEY = 'cms-plugin-google-sheet.pluginHost';
+
   function quote(value) {
     return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
-  function buildCode(host, secret, pageTypes, language) {
+  function loadHost() {
+    try {
+      return window.localStorage ? window.localStorage.getItem(HOST_STORAGE_KEY) || '' : '';
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function saveHost(value) {
+    try {
+      if (window.localStorage) window.localStorage.setItem(HOST_STORAGE_KEY, String(value || '').trim());
+    } catch (error) {
+      // localStorage can be unavailable in private or embedded browsing modes.
+    }
+  }
+
+  function buildCode(host, secret) {
     var normalizedHost = String(host || '').trim().replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
     return "const CMS_PLUGIN_CALLBACK_URL = '" + quote(normalizedHost + '/__plugin/sheets/callback') + "';\n"
       + "const CMS_PLUGIN_WEBHOOK_SECRET = '" + quote(secret || 'YOUR_SHEET_WEBHOOK_SECRET') + "';\n"
-      + "const CMS_PLUGIN_PAGE_TYPES = '" + quote(pageTypes || '') + "';\n"
-      + "const CMS_PLUGIN_LANGUAGE = '" + quote(language || 'mis') + "';\n\n"
+      + "\n"
       + "function onCmsSheetEdit(e) {\n"
       + "  const spreadsheet = SpreadsheetApp.getActive();\n"
-      + "  const sheetName = e && e.range ? e.range.getSheet().getName() : '';\n"
+      + "  const range = e && e.range;\n"
+      + "  if (!range) return;\n"
+      + "  const sheet = range.getSheet();\n"
+      + "  const firstRow = range.getRow();\n"
+      + "  const rowCount = range.getNumRows();\n"
+      + "  const firstDataRow = Math.max(firstRow, 2);\n"
+      + "  const changedRowCount = Math.max(0, firstRow + rowCount - firstDataRow);\n"
+      + "  if (!changedRowCount) return;\n"
+      + "  const lastColumn = sheet.getLastColumn();\n"
+      + "  if (!lastColumn) return;\n"
+      + "  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(function (value) { return String(value || '').trim(); });\n"
+      + "  const rows = sheet.getRange(firstDataRow, 1, changedRowCount, lastColumn).getValues();\n"
       + "  UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {\n"
       + "    method: 'post',\n"
       + "    contentType: 'application/json',\n"
       + "    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_WEBHOOK_SECRET },\n"
       + "    payload: JSON.stringify({\n"
       + "      spreadsheetId: spreadsheet.getId(),\n"
-      + "      pageTypes: CMS_PLUGIN_PAGE_TYPES ? CMS_PLUGIN_PAGE_TYPES.split(',').map(function (value) { return value.trim(); }).filter(Boolean) : undefined,\n"
-      + "      sheetName: sheetName,\n"
-      + "      language: CMS_PLUGIN_LANGUAGE\n"
+      + "      pageType: sheet.getName(),\n"
+      + "      sheetName: sheet.getName(),\n"
+      + "      headers: headers,\n"
+      + "      rows: rows,\n"
+      + "      rowNumbers: rows.map(function (_, index) { return firstDataRow + index; })\n"
       + "    }),\n"
       + "    muteHttpExceptions: true\n"
       + "  });\n"
@@ -598,22 +763,26 @@ const ADMIN_SCRIPT = String.raw`(function () {
   function bind(root) {
     var code = root.querySelector('[data-sheet-apps-script]');
     var host = root.querySelector('[data-sheet-plugin-host]');
-    var pageTypes = root.querySelector('[data-sheet-page-types]');
-    var language = root.querySelector('[data-sheet-language]');
     if (!code || !host) return;
+
+    var storedHost = loadHost();
+    if (!host.value && storedHost) {
+      host.value = storedHost;
+    } else if (host.value) {
+      saveHost(host.value);
+    }
 
     function update() {
       code.textContent = buildCode(
         host.value,
-        code.getAttribute('data-webhook-secret') || '',
-        pageTypes ? pageTypes.value : '',
-        language ? language.value : 'mis'
+        code.getAttribute('data-webhook-secret') || ''
       );
     }
 
-    host.addEventListener('input', update);
-    if (pageTypes) pageTypes.addEventListener('input', update);
-    if (language) language.addEventListener('input', update);
+    host.addEventListener('input', function () {
+      saveHost(host.value);
+      update();
+    });
     update();
   }
 
