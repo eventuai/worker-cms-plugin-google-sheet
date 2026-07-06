@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Base URL of the CMS Worker, for the /__cms page read/write API.
-# CMS_URL = "https://cms.example.com"
+CMS_URL = "https://cms.eventuai.com"
 #
 # Comma-separated page types this plugin declares for delegated read/write.
 # Each type must also be approved from the CMS plugin management UI before the
@@ -14,7 +14,7 @@ compatibility_flags = ["nodejs_compat"]
 SYNC_PAGE_TYPES = "*"
 #
 # Optional default language for localized lect columns.
-DEFAULT_LANGUAGE = "en"
+# DEFAULT_LANGUAGE = "en"
 
 # Secrets:
 #   wrangler secret put PLUGIN_SECRET
