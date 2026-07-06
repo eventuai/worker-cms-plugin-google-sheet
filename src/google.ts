@@ -21,20 +21,6 @@ export class GoogleSheetsError extends Error {
 export class GoogleSheetsClient {
   constructor(private readonly env: PluginEnv) {}
 
-  async createSpreadsheet(title: string, sheetTitles: string[]): Promise<string> {
-    const response = await this.googleFetch('https://sheets.googleapis.com/v4/spreadsheets', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        properties: { title },
-        sheets: sheetTitles.length ? sheetTitles.map((sheetTitle) => ({ properties: { title: sheetTitle } })) : undefined,
-      }),
-    });
-    const result = await response.json() as { spreadsheetId?: string };
-    if (!result.spreadsheetId) throw new GoogleSheetsError('Google did not return a spreadsheet id');
-    return result.spreadsheetId;
-  }
-
   async ensureSheets(spreadsheetId: string, sheetTitles: string[]): Promise<void> {
     const existing = await this.sheetTitles(spreadsheetId);
     const missing = sheetTitles.filter((title) => !existing.has(title));
@@ -57,6 +43,27 @@ export class GoogleSheetsClient {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ range, majorDimension: 'ROWS', values }),
+      },
+    );
+  }
+
+  // Writes individual cells (1-based row/column) in one batch request — used
+  // to renew _hash tokens after a verified import without rewriting the sheet.
+  async updateCells(spreadsheetId: string, sheetTitle: string, cells: Array<{ row: number; column: number; value: string }>): Promise<void> {
+    if (!cells.length) return;
+    await this.googleFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          valueInputOption: 'RAW',
+          data: cells.map((cell) => ({
+            range: `${quoteSheetTitle(sheetTitle)}!${columnLetter(cell.column)}${cell.row}`,
+            majorDimension: 'ROWS',
+            values: [[cell.value]],
+          })),
+        }),
       },
     );
   }
@@ -110,6 +117,15 @@ export function sheetTitleFor(pageType: string): string {
 
 function quoteSheetTitle(title: string): string {
   return `'${title.replace(/'/g, "''")}'`;
+}
+
+// 1-based column index to A1-notation letters (1 -> A, 27 -> AA).
+function columnLetter(column: number): string {
+  let letters = '';
+  for (let value = column; value > 0; value = Math.floor((value - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((value - 1) % 26)) + letters;
+  }
+  return letters;
 }
 
 async function accessToken(env: PluginEnv): Promise<string> {

@@ -60,7 +60,6 @@ export interface SyncRequest {
   sort: SyncSort;
   order: SyncOrder;
   selectedColumns?: Record<string, string[]>;
-  sheetValues?: Record<string, string[][]>;
 }
 
 export type SyncOperator = 'AND' | 'OR' | 'NOT';
@@ -90,14 +89,12 @@ export interface ImportResult {
   ok: boolean;
 }
 
+// Notification-only payload from the Apps Script edit trigger. Row content is
+// deliberately absent from this contract - the plugin re-reads the sheet.
 export interface SheetCallbackPayload {
   spreadsheetId?: unknown;
   pageTypes?: unknown;
   pageType?: unknown;
   sheetName?: unknown;
   language?: unknown;
-  limit?: unknown;
-  headers?: unknown;
-  rows?: unknown;
-  values?: unknown;
 }

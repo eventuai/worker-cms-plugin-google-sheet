@@ -31,16 +31,28 @@ export class CmsClient {
     this.actingUserId = actingUserId;
   }
 
+  // `limit` is the total page cap, not just the per-request batch size — each
+  // HTTP call still fetches at most 500 rows (the CMS API's own ceiling), but
+  // the loop stops once `limit` pages have been collected.
   async listAll(pageType: string, limit = 500): Promise<CmsPage[]> {
+    const cap = Math.max(1, Math.floor(limit));
+    const batchSize = Math.min(cap, 500);
     const pages: CmsPage[] = [];
-    for (let offset = 0; ; offset += limit) {
-      const params = new URLSearchParams({ page_type: pageType, limit: String(limit), offset: String(offset) });
+    for (let offset = 0; pages.length < cap; offset += batchSize) {
+      const requestSize = Math.min(batchSize, cap - pages.length);
+      const params = new URLSearchParams({ page_type: pageType, limit: String(requestSize), offset: String(offset) });
       const path = `/pages?${params}`;
       const result = await this.json<{ pages: CmsPage[]; total: number }>(await this.call('GET', path), 'GET', path);
       pages.push(...result.pages);
       if (pages.length >= result.total || result.pages.length === 0) break;
     }
     return pages;
+  }
+
+  async get(id: number): Promise<CmsPage> {
+    const path = `/pages/${id}`;
+    const result = await this.json<{ page: CmsPage }>(await this.call('GET', path), 'GET', path);
+    return result.page;
   }
 
   async update(id: number, input: CmsPageInput): Promise<CmsPage> {

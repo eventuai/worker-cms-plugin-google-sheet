@@ -1,7 +1,8 @@
+import { HASH_COLUMN } from './integrity';
 import type { CmsPage, CmsPageInput } from './types';
 
 const BASE_COLUMNS = ['id', 'page_type', 'name', 'slug', 'weight', 'start', 'end', 'timezone', 'page_id', 'updated_at'];
-const READONLY_COLUMNS = new Set(['updated_at']);
+const READONLY_COLUMNS = new Set(['updated_at', HASH_COLUMN]);
 
 type FlatLect = Record<string, string>;
 
@@ -10,11 +11,17 @@ export function sheetColumnsForPages(pages: CmsPage[], language: string): string
   return columnsForRows(rows);
 }
 
-export function pagesToSheetValues(pages: CmsPage[], language: string, selectedColumns?: string[]): string[][] {
+// `hashes` must align with `pages`; when provided, a trailing _hash column is
+// added so imports can verify each row against the current CMS state.
+export function pagesToSheetValues(pages: CmsPage[], language: string, selectedColumns?: string[], hashes?: string[]): string[][] {
   const rows = pages.map((page) => pageToRow(page, language));
   const allColumns = columnsForRows(rows);
   const columns = selectedSheetColumns(allColumns, selectedColumns);
-  return [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+  if (!hashes) return [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
+  return [
+    [...columns, HASH_COLUMN],
+    ...rows.map((row, index) => [...columns.map((column) => row[column] ?? ''), hashes[index] ?? '']),
+  ];
 }
 
 function columnsForRows(rows: Array<Record<string, string>>): string[] {
@@ -44,9 +51,10 @@ function selectedSheetColumns(allColumns: string[], selectedColumns: string[] | 
   return columns.length ? columns : ['id'];
 }
 
-export function sheetValuesToUpdates(values: string[][], defaultPageType: string, language: string): Array<{
+export function sheetValuesToUpdates(values: string[][], pageType: string, language: string): Array<{
   id: number | null;
   input: CmsPageInput;
+  hash: string | null;
   error?: string;
 }> {
   const [headerRow, ...dataRows] = values;
@@ -60,8 +68,9 @@ export function sheetValuesToUpdates(values: string[][], defaultPageType: string
         if (header) record[header] = String(row[index] ?? '');
       });
 
+      const hash = record[HASH_COLUMN]?.trim() || null;
       const id = parseId(record.id);
-      if (id === null) return { id, input: {}, error: 'missing_or_invalid_id' };
+      if (id === null) return { id, input: {}, hash, error: 'missing_or_invalid_id' };
 
       const lectColumns: FlatLect = {};
       for (const [key, value] of Object.entries(record)) {
@@ -70,7 +79,9 @@ export function sheetValuesToUpdates(values: string[][], defaultPageType: string
       }
 
       const input: CmsPageInput = {
-        page_type: record.page_type || defaultPageType,
+        // The sheet tab decides the page type; a page_type cell in the row is
+        // ignored so an edited cell cannot retype (or hijack) another page.
+        page_type: pageType,
         name: record.name || undefined,
         slug: record.slug || undefined,
         weight: parseOptionalNumber(record.weight),
@@ -80,7 +91,7 @@ export function sheetValuesToUpdates(values: string[][], defaultPageType: string
         page_id: parseOptionalNumber(record.page_id),
         lect: unflattenLect(lectColumns, language),
       };
-      return { id, input: pruneUndefined(input) };
+      return { id, input: pruneUndefined(input), hash };
     });
 }
 
