@@ -68,7 +68,8 @@ non-OK status.
 
 Google Sheets does not call plugin Workers directly when a user edits a cell.
 To push edits back automatically, add an Apps Script installable edit trigger to
-the spreadsheet. The plugin admin page includes a script template that posts to:
+the spreadsheet. After export completes, the plugin shows a script template that
+posts to:
 
 ```text
 https://YOUR_PLUGIN_HOST/__plugin/sheets/callback
@@ -97,13 +98,12 @@ callback token**:
 token = base64url( HMAC-SHA256( SHEET_WEBHOOK_SECRET, "callback:" + spreadsheetId ) )
 ```
 
-The sync page fills the token into the script preview as soon as a spreadsheet
-ID is set, and the export-complete page always includes it — so editors can
-set up their own triggers without an admin handing them any global credential.
-A leaked token only authorizes callbacks for that one spreadsheet (which the
-holder could already edit), and even then only triggers a re-import of the
-sheet's own `_signature`-verified content. Rotating `SHEET_WEBHOOK_SECRET`
-invalidates every issued token.
+The export-complete page includes the token for the exported spreadsheet, so
+editors can set up their own triggers without an admin handing them any global
+credential. A leaked token only authorizes callbacks for that one spreadsheet
+(which the holder could already edit), and even then only triggers a re-import
+of the sheet's own `_signature`-verified content. Rotating
+`SHEET_WEBHOOK_SECRET` invalidates every issued token.
 
 ## Row integrity (`_signature`)
 
@@ -129,10 +129,9 @@ invalidates all outstanding sheet signatures.
 
 Do not edit or delete the `_signature` column in the spreadsheet.
 
-The plugin admin page includes a **Plugin host** input beside the Apps Script
-preview. Typing a host updates the callback URL in the script preview after the
-plugin asset `/assets/sheet-sync-admin.js` has been approved from CMS plugin
-asset management.
+The plugin admin page includes a **Plugin host** input. It is saved in browser
+localStorage and used to build the callback URL shown on the export-complete
+page.
 
 Create the spreadsheet yourself (e.g. via [sheets.new](https://sheets.new)),
 share it with the service account email, then paste its URL into the

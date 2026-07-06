@@ -269,12 +269,9 @@ describe('admin sync', () => {
     expect(response.status).toBe(403);
   });
 
-  it('renders the sync page as a client view with a scoped callback token in the Apps Script', async () => {
-    const token = await callbackToken('sheet-secret', 'sheet-123');
+  it('renders the sync page as a client view without pre-export callback code', async () => {
     const response = await plugin.fetch(request('/__plugin/admin/sync?plugin_host=https%3A%2F%2Fplugin.example&page_types=guest&language=mis&spreadsheet_id=sheet-123'), env({ GOOGLE_SERVICE_ACCOUNT_EMAIL: 'sheets-bot@project.iam.gserviceaccount.com' }));
     const data = await response.json() as {
-      appScriptCode: string;
-      callbackToken: string;
       pluginHost: string;
       adminScriptSrc: string;
       serviceAccountEmail: string;
@@ -285,35 +282,28 @@ describe('admin sync', () => {
 
     expect(response.headers.get('x-cms-client-view')).toBe('1');
     expect(response.headers.get('x-cms-view-path')).toBe('/templates/sync.json');
-    expect(data.callbackToken).toBe(token);
     expect(data.pluginHost).toBe('https://plugin.example');
     expect(data.serviceAccountEmail).toBe('sheets-bot@project.iam.gserviceaccount.com');
     expect(data.limit).toBe(500);
     expect(data.criteriaRows).toEqual([{ index: 1, search: '', path: '' }]);
     expect(data.nextCriterionIndex).toBe(2);
-    expect(data.appScriptCode).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
-    expect(data.appScriptCode).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${token}';`);
-    expect(data.appScriptCode).toContain('spreadsheetId: SpreadsheetApp.getActive().getId()');
-    expect(data.appScriptCode).toContain('sheetName: sheet.getName()');
-    expect(data.appScriptCode).toContain('rowNumbers: rowNumbers');
-    // The script reports which rows changed, never their content, so it must
-    // not read cell values.
-    expect(data.appScriptCode).not.toContain('getValues');
-    expect(data.appScriptCode).not.toContain('CMS_PLUGIN_LANGUAGE');
+    expect('callbackToken' in data).toBe(false);
+    expect('appScriptCode' in data).toBe(false);
     expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
   });
 
-  it('never embeds the raw webhook secret, even without a spreadsheet id or for editors', async () => {
+  it('never embeds callback code or the raw webhook secret on the sync page', async () => {
     const noSheet = await plugin.fetch(request('/__plugin/admin/sync'), env());
-    const noSheetData = await noSheet.json() as { callbackToken: string; appScriptCode: string };
-    expect(noSheetData.callbackToken).toBe('');
-    expect(noSheetData.appScriptCode).toContain("const CMS_PLUGIN_CALLBACK_TOKEN = 'YOUR_SHEET_CALLBACK_TOKEN';");
-    expect(noSheetData.appScriptCode).not.toContain('sheet-secret');
+    const noSheetData = await noSheet.json() as Record<string, unknown>;
+    expect('callbackToken' in noSheetData).toBe(false);
+    expect('appScriptCode' in noSheetData).toBe(false);
+    expect(JSON.stringify(noSheetData)).not.toContain('sheet-secret');
 
     const editor = await plugin.fetch(request('/__plugin/admin/sync?spreadsheet_id=sheet-123', {}, 'editor'), env());
-    const editorData = await editor.json() as { callbackToken: string; appScriptCode: string };
-    expect(editorData.callbackToken).toBe(await callbackToken('sheet-secret', 'sheet-123'));
-    expect(editorData.appScriptCode).not.toContain("'sheet-secret'");
+    const editorData = await editor.json() as Record<string, unknown>;
+    expect('callbackToken' in editorData).toBe(false);
+    expect('appScriptCode' in editorData).toBe(false);
+    expect(JSON.stringify(editorData)).not.toContain('sheet-secret');
   });
 
   it('derives criteria rows and the next index from whatever search/path params are present', async () => {
@@ -340,16 +330,18 @@ describe('admin sync', () => {
     expect(sectionHtml).toContain('data-sheet-plugin-host');
     expect(sectionHtml).toContain('name="plugin_host"');
     expect(sectionHtml).toContain('Preview');
+    expect(sectionHtml).not.toContain('data-sheet-apps-script');
+    expect(sectionHtml).not.toContain('<pre');
     expect(sectionHtml).not.toContain('data-sheet-language');
     expect(sectionHtml).not.toContain('>Language<');
     expect(sectionHtml).not.toContain('Export to Sheet');
     expect(asset.headers.get('content-type')).toContain('text/javascript');
     const assetScript = await asset.text();
-    expect(assetScript).toContain('data-sheet-apps-script');
     expect(assetScript).toContain('cms-plugin-google-sheet.pluginHost');
     expect(assetScript).toContain('localStorage.setItem');
-    expect(assetScript).toContain('SpreadsheetApp.getActive().getId()');
-    expect(assetScript).toContain('rowNumbers: rowNumbers');
+    expect(assetScript).not.toContain('data-sheet-apps-script');
+    expect(assetScript).not.toContain('SpreadsheetApp.getActive().getId()');
+    expect(assetScript).not.toContain('rowNumbers: rowNumbers');
     expect(assetScript).not.toContain('getValues');
     expect(assetScript).not.toContain('CMS_PLUGIN_LANGUAGE');
   });

@@ -88,7 +88,7 @@ function manifest(env: PluginEnv): Record<string, unknown> {
       writeTypes: declaredTypes,
     },
     assets: [
-      { path: ADMIN_SCRIPT_ASSET, label: 'Google Sheet admin callback preview' },
+      { path: ADMIN_SCRIPT_ASSET, label: 'Google Sheet admin helpers' },
     ],
   };
 }
@@ -344,14 +344,6 @@ async function syncViewData(env: PluginEnv, params: URLSearchParams): Promise<Re
   const ready = !!(env.CMS_URL && env.PLUGIN_SECRET && (env.GOOGLE_ACCESS_TOKEN || (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY)));
   const criteriaIndexes = criteriaIndexesFromParams(params);
   const maxCriterionIndex = criteriaIndexes.reduce((max, index) => Math.max(max, index), 0);
-  // The callback credential is scoped to one spreadsheet, so it can only be
-  // generated once a spreadsheet id is known (typed into the form or after an
-  // export). Scoped tokens are safe to show to any role that can reach this
-  // page; the raw SHEET_WEBHOOK_SECRET is never rendered.
-  const normalizedSpreadsheetId = spreadsheetIdFromInput(spreadsheetId);
-  const token = normalizedSpreadsheetId && env.SHEET_WEBHOOK_SECRET
-    ? await callbackToken(env.SHEET_WEBHOOK_SECRET, normalizedSpreadsheetId)
-    : '';
   return {
     ready,
     callbackReady: !!env.SHEET_WEBHOOK_SECRET,
@@ -359,11 +351,6 @@ async function syncViewData(env: PluginEnv, params: URLSearchParams): Promise<Re
     pageTypes,
     pluginHost,
     serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? '',
-    callbackToken: token,
-    appScriptCode: appsScriptTemplate({
-      pluginHost: pluginHost || 'https://YOUR_PLUGIN_HOST',
-      callbackToken: token || 'YOUR_SHEET_CALLBACK_TOKEN',
-    }),
     operatorOptions: options(['AND', 'OR', 'NOT'], operator),
     sortOptions: options(['updated_at', 'created_at', 'name', 'weight', 'id'], sort, {
       updated_at: 'Updated',
@@ -459,11 +446,11 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
         </div>
         <div class="flex gap-3">
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700">4</div>
-          <p class="text-sm text-gray-700">In the spreadsheet, open Extensions &gt; Apps Script and paste the code from the <span class="font-semibold">Apps Script callback</span> box below. The callback token in the code is generated for your spreadsheet once its ID is set (it is always filled in on the export-complete page).</p>
+          <p class="text-sm text-gray-700">Run Preview, choose the columns, then export. On the export-complete page, copy the Apps Script callback generated for that spreadsheet.</p>
         </div>
         <div class="flex gap-3">
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700">5</div>
-          <p class="text-sm text-gray-700">In the Apps Script editor, open Triggers (clock icon) &gt; Add Trigger, choose function <span class="font-mono">onCmsSheetEdit</span>, event source "From spreadsheet", event type "On edit", then Save.</p>
+          <p class="text-sm text-gray-700">In the spreadsheet, open Extensions &gt; Apps Script, paste the callback code, then open Triggers (clock icon) &gt; Add Trigger, choose function <span class="font-mono">onCmsSheetEdit</span>, event source "From spreadsheet", event type "On edit", then Save.</p>
         </div>
       </div>
     </div>
@@ -621,16 +608,15 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
 
     <div class="mt-5 max-w-5xl rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
       <div class="mb-3">
-        <h2 class="text-lg font-bold text-gray-900">Apps Script callback</h2>
-        <p class="mt-1 text-sm text-gray-500">Use an installable edit trigger in the spreadsheet to post edited tabs back to this plugin.</p>
+        <h2 class="text-lg font-bold text-gray-900">Callback host</h2>
+        <p class="mt-1 text-sm text-gray-500">Saved in this browser and used when the export-complete page builds the Apps Script callback.</p>
       </div>
       <label class="mb-4 block">
         <span class="block text-sm font-medium text-gray-700 mb-1">Plugin host</span>
         <input name="plugin_host" form="sheet-sync-form" value="{{ pluginHost | escape }}" placeholder="https://worker-cms-plugin-google-sheet.example.workers.dev" data-sheet-plugin-host
           class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
       </label>
-      <p class="mb-3 text-xs text-gray-500">The script authenticates with a token scoped to one spreadsheet, so it is safe to share with sheet editors. The token appears here once a Spreadsheet ID is set (it is always included on the export-complete page). Approve this plugin's admin asset before expecting the preview to update while typing.</p>
-      <pre class="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-100"><code data-sheet-apps-script data-callback-token="{{ callbackToken | escape }}">{{ appScriptCode | escape }}</code></pre>
+      <p class="text-xs text-gray-500">The Apps Script callback is shown after export completes, when the plugin has the spreadsheet ID needed to generate a scoped token.</p>
       <script src="{{ adminScriptSrc | escape }}" defer></script>
     </div>
   </div>`;
@@ -913,10 +899,6 @@ function jsString(value: string): string {
 const ADMIN_SCRIPT = String.raw`(function () {
   var HOST_STORAGE_KEY = 'cms-plugin-google-sheet.pluginHost';
 
-  function quote(value) {
-    return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  }
-
   function loadHost() {
     try {
       return window.localStorage ? window.localStorage.getItem(HOST_STORAGE_KEY) || '' : '';
@@ -933,39 +915,9 @@ const ADMIN_SCRIPT = String.raw`(function () {
     }
   }
 
-  function buildCode(host, token) {
-    var normalizedHost = String(host || '').trim().replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
-    return "const CMS_PLUGIN_CALLBACK_URL = '" + quote(normalizedHost + '/__plugin/sheets/callback') + "';\n"
-      + "const CMS_PLUGIN_CALLBACK_TOKEN = '" + quote(token || 'YOUR_SHEET_CALLBACK_TOKEN') + "';\n"
-      + "\n"
-      + "function onCmsSheetEdit(e) {\n"
-      + "  const range = e && e.range;\n"
-      + "  if (!range) return;\n"
-      + "  const sheet = range.getSheet();\n"
-      + "  const firstRow = Math.max(range.getRow(), 2);\n"
-      + "  const lastRow = range.getRow() + range.getNumRows() - 1;\n"
-      + "  if (lastRow < firstRow) return; // only the header row changed\n"
-      + "  const rowNumbers = [];\n"
-      + "  for (var row = firstRow; row <= lastRow; row++) rowNumbers.push(row);\n"
-      + "  UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {\n"
-      + "    method: 'post',\n"
-      + "    contentType: 'application/json',\n"
-      + "    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_CALLBACK_TOKEN },\n"
-      + "    payload: JSON.stringify({\n"
-      + "      spreadsheetId: SpreadsheetApp.getActive().getId(),\n"
-      + "      pageType: sheet.getName(),\n"
-      + "      sheetName: sheet.getName(),\n"
-      + "      rowNumbers: rowNumbers\n"
-      + "    }),\n"
-      + "    muteHttpExceptions: true\n"
-      + "  });\n"
-      + "}";
-  }
-
   function bind(root) {
-    var code = root.querySelector('[data-sheet-apps-script]');
     var host = root.querySelector('[data-sheet-plugin-host]');
-    if (!code || !host) return;
+    if (!host) return;
 
     var storedHost = loadHost();
     if (!host.value && storedHost) {
@@ -974,18 +926,9 @@ const ADMIN_SCRIPT = String.raw`(function () {
       saveHost(host.value);
     }
 
-    function update() {
-      code.textContent = buildCode(
-        host.value,
-        code.getAttribute('data-callback-token') || ''
-      );
-    }
-
     host.addEventListener('input', function () {
       saveHost(host.value);
-      update();
     });
-    update();
   }
 
   if (document.readyState === 'loading') {
