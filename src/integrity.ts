@@ -29,6 +29,15 @@ export async function pageHash(key: string, spreadsheetId: string, page: CmsPage
   return hmacBase64Url(key, material);
 }
 
+// Credential the generated Apps Script sends with edit callbacks. It is
+// derived from SHEET_WEBHOOK_SECRET but scoped to one spreadsheet, so it is
+// safe to embed in a container-bound script that every sheet editor can read:
+// leaking it only authorizes callbacks for that spreadsheet, and rotating
+// SHEET_WEBHOOK_SECRET invalidates every issued token at once.
+export async function callbackToken(webhookSecret: string, spreadsheetId: string): Promise<string> {
+  return hmacBase64Url(webhookSecret, `callback:${spreadsheetId}`);
+}
+
 // JSON.stringify with object keys sorted at every depth, so key order in the
 // CMS response can never flip the hash.
 export function canonicalJson(value: unknown): string {

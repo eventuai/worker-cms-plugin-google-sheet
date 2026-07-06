@@ -74,14 +74,35 @@ the spreadsheet. The plugin admin page includes a script template that posts to:
 https://YOUR_PLUGIN_HOST/__plugin/sheets/callback
 ```
 
-The callback must send `x-sheet-webhook-secret: SHEET_WEBHOOK_SECRET` as a
-header (a `?secret=` query parameter is not accepted — it would leak into
-access logs). The payload is a notification only: `spreadsheetId` plus the tab
-name. Any row data in the payload is ignored; the plugin always re-reads the
-spreadsheet through the Sheets API and applies the same verified import logic
-used by **Import from Sheet**. This means a leaked webhook secret can at most
-trigger a re-import of what is already in a previously exported sheet — it
-cannot inject content of its own.
+The callback authenticates with the `x-sheet-webhook-secret` header (a
+`?secret=` query parameter is not accepted — it would leak into access logs).
+The payload is a notification only: `spreadsheetId` plus the tab name. Any row
+data in the payload is ignored; the plugin always re-reads the spreadsheet
+through the Sheets API and applies the same verified import logic used by
+**Import from Sheet**.
+
+### Callback tokens (how the secret is shared with Apps Script)
+
+Anything pasted into a container-bound Apps Script is readable by every editor
+of that spreadsheet, so the generated script never contains the raw
+`SHEET_WEBHOOK_SECRET`. Instead the plugin derives a **per-spreadsheet
+callback token**:
+
+```text
+token = base64url( HMAC-SHA256( SHEET_WEBHOOK_SECRET, "callback:" + spreadsheetId ) )
+```
+
+The sync page fills the token into the script preview as soon as a spreadsheet
+ID is set, and the export-complete page always includes it — so editors can
+set up their own triggers without an admin handing them any global credential.
+A leaked token only authorizes callbacks for that one spreadsheet (which the
+holder could already edit), and even then only triggers a re-import of the
+sheet's own `_hash`-verified content. Rotating `SHEET_WEBHOOK_SECRET`
+invalidates every issued token.
+
+The callback also still accepts the raw `SHEET_WEBHOOK_SECRET` in the same
+header, so triggers installed before tokens existed keep working; migrate them
+to tokens when convenient.
 
 ## Row integrity (`_hash`)
 

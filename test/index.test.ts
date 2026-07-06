@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
-import { pageHash } from '../src/integrity';
+import { callbackToken, pageHash } from '../src/integrity';
 import { filterAndSortPages } from '../src/search';
 import { flattenLect, pagesToSheetValues, sheetValuesToUpdates } from '../src/sheet-mapper';
 import type { CmsPage, PluginEnv } from '../src/types';
@@ -254,11 +254,12 @@ describe('admin sync', () => {
     expect(response.status).toBe(403);
   });
 
-  it('renders the sync page as a client view with the webhook secret applied to Apps Script', async () => {
-    const response = await plugin.fetch(request('/__plugin/admin/sync?plugin_host=https%3A%2F%2Fplugin.example&page_types=guest&language=mis'), env({ GOOGLE_SERVICE_ACCOUNT_EMAIL: 'sheets-bot@project.iam.gserviceaccount.com' }));
+  it('renders the sync page as a client view with a scoped callback token in the Apps Script', async () => {
+    const token = await callbackToken('sheet-secret', 'sheet-123');
+    const response = await plugin.fetch(request('/__plugin/admin/sync?plugin_host=https%3A%2F%2Fplugin.example&page_types=guest&language=mis&spreadsheet_id=sheet-123'), env({ GOOGLE_SERVICE_ACCOUNT_EMAIL: 'sheets-bot@project.iam.gserviceaccount.com' }));
     const data = await response.json() as {
       appScriptCode: string;
-      webhookSecret: string;
+      callbackToken: string;
       pluginHost: string;
       adminScriptSrc: string;
       serviceAccountEmail: string;
@@ -269,14 +270,14 @@ describe('admin sync', () => {
 
     expect(response.headers.get('x-cms-client-view')).toBe('1');
     expect(response.headers.get('x-cms-view-path')).toBe('/templates/sync.json');
-    expect(data.webhookSecret).toBe('sheet-secret');
+    expect(data.callbackToken).toBe(token);
     expect(data.pluginHost).toBe('https://plugin.example');
     expect(data.serviceAccountEmail).toBe('sheets-bot@project.iam.gserviceaccount.com');
     expect(data.limit).toBe(500);
     expect(data.criteriaRows).toEqual([{ index: 1, search: '', path: '' }]);
     expect(data.nextCriterionIndex).toBe(2);
     expect(data.appScriptCode).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
-    expect(data.appScriptCode).toContain("const CMS_PLUGIN_WEBHOOK_SECRET = 'sheet-secret';");
+    expect(data.appScriptCode).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${token}';`);
     expect(data.appScriptCode).toContain('spreadsheetId: SpreadsheetApp.getActive().getId()');
     expect(data.appScriptCode).toContain('sheetName: sheet.getName()');
     expect(data.appScriptCode).not.toContain('rows:');
@@ -284,13 +285,17 @@ describe('admin sync', () => {
     expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
   });
 
-  it('hides the webhook secret from non-admin users', async () => {
-    const response = await plugin.fetch(request('/__plugin/admin/sync', {}, 'editor'), env());
-    const data = await response.json() as { webhookSecret: string; appScriptCode: string };
+  it('never embeds the raw webhook secret, even without a spreadsheet id or for editors', async () => {
+    const noSheet = await plugin.fetch(request('/__plugin/admin/sync'), env());
+    const noSheetData = await noSheet.json() as { callbackToken: string; appScriptCode: string };
+    expect(noSheetData.callbackToken).toBe('');
+    expect(noSheetData.appScriptCode).toContain("const CMS_PLUGIN_CALLBACK_TOKEN = 'YOUR_SHEET_CALLBACK_TOKEN';");
+    expect(noSheetData.appScriptCode).not.toContain('sheet-secret');
 
-    expect(data.webhookSecret).toBe('');
-    expect(data.appScriptCode).toContain("const CMS_PLUGIN_WEBHOOK_SECRET = 'YOUR_SHEET_WEBHOOK_SECRET';");
-    expect(data.appScriptCode).not.toContain('sheet-secret');
+    const editor = await plugin.fetch(request('/__plugin/admin/sync?spreadsheet_id=sheet-123', {}, 'editor'), env());
+    const editorData = await editor.json() as { callbackToken: string; appScriptCode: string };
+    expect(editorData.callbackToken).toBe(await callbackToken('sheet-secret', 'sheet-123'));
+    expect(editorData.appScriptCode).not.toContain("'sheet-secret'");
   });
 
   it('derives criteria rows and the next index from whatever search/path params are present', async () => {
@@ -490,7 +495,8 @@ describe('admin sync', () => {
     expect(html).toContain('https://docs.google.com/spreadsheets/d/sheet-123/edit');
     expect(html).toContain('Apps Script callback');
     expect(html).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
-    expect(html).toContain("const CMS_PLUGIN_WEBHOOK_SECRET = 'sheet-secret';");
+    expect(html).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${await callbackToken('sheet-secret', 'sheet-123')}';`);
+    expect(html).not.toContain("'sheet-secret'");
     const valueUpdates = calls.filter((call) => call.init?.method === 'PUT');
     expect(valueUpdates).toHaveLength(2);
     const guestBody = JSON.parse(String(valueUpdates[0].init?.body)) as { values: string[][] };
@@ -929,6 +935,64 @@ describe('admin sync', () => {
     expect(cmsUpdates).toHaveLength(1);
     expect(cmsUpdates[0].id).toBe('11');
     expect(JSON.stringify(cmsUpdates[0].body)).not.toContain('Injected via payload');
+  });
+
+  it('accepts callbacks authenticated with the per-spreadsheet token', async () => {
+    const rowHash = await guestRowHash();
+    const cmsUpdates: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const parsed = new URL(url);
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchUpdate')) {
+        return Response.json({});
+      }
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
+        return Response.json({
+          values: [
+            ['id', 'name', '@status', '_hash'],
+            ['11', 'Ada Guest', 'confirmed', rowHash],
+          ],
+        });
+      }
+      const pageMatch = parsed.pathname.match(/^\/__cms\/pages\/(\d+)$/);
+      if (parsed.hostname === 'cms.test' && pageMatch && init?.method === 'PUT') {
+        cmsUpdates.push(pageMatch[1]);
+        return Response.json({ page: guestPage });
+      }
+      if (parsed.hostname === 'cms.test' && pageMatch) {
+        return Response.json({ page: guestPage });
+      }
+      return Response.json({});
+    }));
+
+    const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
+      },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+    }), env());
+
+    expect(response.status).toBe(200);
+    expect(cmsUpdates).toEqual(['11']);
+  });
+
+  it('rejects a token issued for a different spreadsheet', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('No upstream request should be made for a rejected callback');
+    }));
+
+    const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'other-sheet'),
+      },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+    }), env());
+
+    expect(response.status).toBe(403);
   });
 
   it('rejects unauthenticated sheet callbacks', async () => {

@@ -1,6 +1,6 @@
 import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
-import { HASH_COLUMN, pageHash, secureEquals } from './integrity';
+import { HASH_COLUMN, callbackToken, pageHash, secureEquals } from './integrity';
 import { filterAndSortPages, parseCriteria, parseOperator, parseOrder, parseSort } from './search';
 import { pagesToSheetValues, sheetColumnsForPages, sheetValuesToUpdates } from './sheet-mapper';
 import type { CmsUser, ImportResult, PluginEnv, SheetCallbackPayload, SyncPreviewResult, SyncRequest, SyncResult } from './types';
@@ -43,13 +43,17 @@ async function handleSheetCallback(request: Request, env: PluginEnv): Promise<Re
   if (request.method !== 'POST') {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
-
-  const forbidden = await requireSheetWebhookSecret(request, env);
-  if (forbidden) return forbidden;
+  if (!env.SHEET_WEBHOOK_SECRET) {
+    return Response.json({ error: 'webhook_not_configured' }, { status: 500 });
+  }
 
   try {
+    // The callback credential is scoped to the spreadsheet in the payload, so
+    // the payload must be parsed before the credential can be verified.
     const payload = await request.json().catch(() => null) as SheetCallbackPayload | null;
     const sync = syncRequestFromCallback(payload, env);
+    const forbidden = await requireCallbackAuth(request, env.SHEET_WEBHOOK_SECRET, sync.spreadsheetId);
+    if (forbidden) return forbidden;
     const result = await importFromSheet(new CmsClient(env), new GoogleSheetsClient(env), sync, env);
     return Response.json(result, { status: result.ok ? 200 : 409 });
   } catch (error) {
@@ -90,7 +94,6 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
   if (viewResponse) return viewResponse;
 
   const user = parseCmsUser(request.headers.get('x-cms-user'));
-  const showSecrets = isAdminUser(user);
 
   if (request.method === 'POST') {
     const form = await request.formData();
@@ -106,7 +109,7 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
     }
     if (action === 'export') {
       const result = await exportToSheet(cms, sheets, sync, env);
-      return chrome('Google Sheets export', resultView('Export complete', exportSummary(result, sync, env, showSecrets)));
+      return chrome('Google Sheets export', resultView('Export complete', await exportSummary(result, sync, env)));
     }
     if (action === 'import') {
       const result = await importFromSheet(cms, sheets, sync, env);
@@ -115,13 +118,7 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
     }
   }
 
-  return clientView('Google Sheets', '/templates/sync.json', syncViewData(env, url.searchParams, showSecrets));
-}
-
-// The manifest exposes this plugin to editors too, but the webhook secret is
-// admin material: an editor who sees it can push arbitrary sheet callbacks.
-function isAdminUser(user: CmsUser): boolean {
-  return String(user.role ?? '').split(',').map((role) => role.trim()).includes('admin');
+  return clientView('Google Sheets', '/templates/sync.json', await syncViewData(env, url.searchParams));
 }
 
 async function previewExport(cms: CmsClient, sync: SyncRequest): Promise<SyncPreviewResult> {
@@ -309,7 +306,7 @@ function selectedColumnsFromForm(form: FormData, pageTypes: string[]): Record<st
   return selected;
 }
 
-function syncViewData(env: PluginEnv, params: URLSearchParams, showSecrets: boolean): Record<string, unknown> {
+async function syncViewData(env: PluginEnv, params: URLSearchParams): Promise<Record<string, unknown>> {
   const pageTypes = params.get('page_types') || configuredPageTypes(env).join(', ');
   const spreadsheetId = params.get('spreadsheet_id') || '';
   const operator = params.get('operator') || 'AND';
@@ -320,6 +317,14 @@ function syncViewData(env: PluginEnv, params: URLSearchParams, showSecrets: bool
   const ready = !!(env.CMS_URL && env.PLUGIN_SECRET && (env.GOOGLE_ACCESS_TOKEN || (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY)));
   const criteriaIndexes = criteriaIndexesFromParams(params);
   const maxCriterionIndex = criteriaIndexes.reduce((max, index) => Math.max(max, index), 0);
+  // The callback credential is scoped to one spreadsheet, so it can only be
+  // generated once a spreadsheet id is known (typed into the form or after an
+  // export). Scoped tokens are safe to show to any role that can reach this
+  // page; the raw SHEET_WEBHOOK_SECRET is never rendered.
+  const normalizedSpreadsheetId = spreadsheetIdFromInput(spreadsheetId);
+  const token = normalizedSpreadsheetId && env.SHEET_WEBHOOK_SECRET
+    ? await callbackToken(env.SHEET_WEBHOOK_SECRET, normalizedSpreadsheetId)
+    : '';
   return {
     ready,
     callbackReady: !!env.SHEET_WEBHOOK_SECRET,
@@ -327,10 +332,10 @@ function syncViewData(env: PluginEnv, params: URLSearchParams, showSecrets: bool
     pageTypes,
     pluginHost,
     serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL ?? '',
-    webhookSecret: showSecrets ? env.SHEET_WEBHOOK_SECRET ?? '' : '',
+    callbackToken: token,
     appScriptCode: appsScriptTemplate({
       pluginHost: pluginHost || 'https://YOUR_PLUGIN_HOST',
-      webhookSecret: (showSecrets && env.SHEET_WEBHOOK_SECRET) || 'YOUR_SHEET_WEBHOOK_SECRET',
+      callbackToken: token || 'YOUR_SHEET_CALLBACK_TOKEN',
     }),
     operatorOptions: options(['AND', 'OR', 'NOT'], operator),
     sortOptions: options(['updated_at', 'created_at', 'name', 'weight', 'id'], sort, {
@@ -427,7 +432,7 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
         </div>
         <div class="flex gap-3">
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700">4</div>
-          <p class="text-sm text-gray-700">In the spreadsheet, open Extensions &gt; Apps Script and paste the code from the <span class="font-semibold">Apps Script callback</span> box below.</p>
+          <p class="text-sm text-gray-700">In the spreadsheet, open Extensions &gt; Apps Script and paste the code from the <span class="font-semibold">Apps Script callback</span> box below. The callback token in the code is generated for your spreadsheet once its ID is set (it is always filled in on the export-complete page).</p>
         </div>
         <div class="flex gap-3">
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700">5</div>
@@ -597,8 +602,8 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
         <input name="plugin_host" form="sheet-sync-form" value="{{ pluginHost | escape }}" placeholder="https://worker-cms-plugin-google-sheet.example.workers.dev" data-sheet-plugin-host
           class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
       </label>
-      <p class="mb-3 text-xs text-gray-500">The webhook secret is already inserted from SHEET_WEBHOOK_SECRET. Approve this plugin's admin asset before expecting the preview to update while typing.</p>
-      <pre class="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-100"><code data-sheet-apps-script data-webhook-secret="{{ webhookSecret | escape }}">{{ appScriptCode | escape }}</code></pre>
+      <p class="mb-3 text-xs text-gray-500">The script authenticates with a token scoped to one spreadsheet, so it is safe to share with sheet editors. The token appears here once a Spreadsheet ID is set (it is always included on the export-complete page). Approve this plugin's admin asset before expecting the preview to update while typing.</p>
+      <pre class="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-100"><code data-sheet-apps-script data-callback-token="{{ callbackToken | escape }}">{{ appScriptCode | escape }}</code></pre>
       <script src="{{ adminScriptSrc | escape }}" defer></script>
     </div>
   </div>`;
@@ -615,10 +620,12 @@ function resultView(title: string, body: string): string {
   </div>`;
 }
 
-function exportSummary(result: SyncResult, sync: SyncRequest, env: PluginEnv, showSecrets: boolean): string {
+async function exportSummary(result: SyncResult, sync: SyncRequest, env: PluginEnv): Promise<string> {
   const appScriptCode = appsScriptTemplate({
     pluginHost: sync.pluginHost || 'https://YOUR_PLUGIN_HOST',
-    webhookSecret: (showSecrets && env.SHEET_WEBHOOK_SECRET) || 'YOUR_SHEET_WEBHOOK_SECRET',
+    callbackToken: env.SHEET_WEBHOOK_SECRET
+      ? await callbackToken(env.SHEET_WEBHOOK_SECRET, result.spreadsheetId)
+      : 'YOUR_SHEET_CALLBACK_TOKEN',
   });
   return `<div class="space-y-4">
     ${notice('Spreadsheet ready', `<a class="font-semibold text-indigo-700 hover:text-indigo-900" href="${esc(result.spreadsheetUrl)}">${esc(result.spreadsheetId)}</a>`, 'green')}
@@ -782,16 +789,17 @@ function requirePluginSecret(request: Request, secret: string | undefined): Resp
 }
 
 // Header-only on purpose: a `?secret=` query parameter would end up in access
-// logs and Apps Script execution logs.
-async function requireSheetWebhookSecret(request: Request, env: PluginEnv): Promise<Response | null> {
-  if (!env.SHEET_WEBHOOK_SECRET) {
-    return Response.json({ error: 'webhook_not_configured' }, { status: 500 });
+// logs and Apps Script execution logs. The header may carry either the
+// per-spreadsheet callback token (what generated Apps Scripts use) or the raw
+// SHEET_WEBHOOK_SECRET (kept for triggers installed before tokens existed).
+async function requireCallbackAuth(request: Request, webhookSecret: string, spreadsheetId: string): Promise<Response | null> {
+  const presented = request.headers.get('x-sheet-webhook-secret') ?? '';
+  if (presented) {
+    const token = await callbackToken(webhookSecret, spreadsheetId);
+    if (await secureEquals(presented, token)) return null;
+    if (await secureEquals(presented, webhookSecret)) return null;
   }
-  const actual = request.headers.get('x-sheet-webhook-secret') ?? '';
-  if (!actual || !(await secureEquals(actual, env.SHEET_WEBHOOK_SECRET))) {
-    return Response.json({ error: 'forbidden' }, { status: 403 });
-  }
-  return null;
+  return Response.json({ error: 'forbidden' }, { status: 403 });
 }
 
 function parseCmsUser(header: string | null): CmsUser {
@@ -846,12 +854,13 @@ function esc(value: unknown): string {
 }
 
 // The generated trigger only *notifies* the plugin that a tab changed; the
-// plugin re-reads the sheet itself. Keeping row data out of the payload means
-// a leaked webhook secret cannot be used to inject content.
-function appsScriptTemplate(opts: { pluginHost: string; webhookSecret: string }): string {
+// plugin re-reads the sheet itself. The embedded credential is a token scoped
+// to this one spreadsheet (never the raw webhook secret), so it is safe in a
+// container-bound script that every sheet editor can open and read.
+function appsScriptTemplate(opts: { pluginHost: string; callbackToken: string }): string {
   const host = opts.pluginHost.replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
   return `const CMS_PLUGIN_CALLBACK_URL = '${jsString(`${host}/__plugin/sheets/callback`)}';
-const CMS_PLUGIN_WEBHOOK_SECRET = '${jsString(opts.webhookSecret)}';
+const CMS_PLUGIN_CALLBACK_TOKEN = '${jsString(opts.callbackToken)}';
 
 function onCmsSheetEdit(e) {
   const range = e && e.range;
@@ -862,7 +871,7 @@ function onCmsSheetEdit(e) {
   UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {
     method: 'post',
     contentType: 'application/json',
-    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_WEBHOOK_SECRET },
+    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_CALLBACK_TOKEN },
     payload: JSON.stringify({
       spreadsheetId: SpreadsheetApp.getActive().getId(),
       pageType: sheet.getName(),
@@ -900,10 +909,10 @@ const ADMIN_SCRIPT = String.raw`(function () {
     }
   }
 
-  function buildCode(host, secret) {
+  function buildCode(host, token) {
     var normalizedHost = String(host || '').trim().replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
     return "const CMS_PLUGIN_CALLBACK_URL = '" + quote(normalizedHost + '/__plugin/sheets/callback') + "';\n"
-      + "const CMS_PLUGIN_WEBHOOK_SECRET = '" + quote(secret || 'YOUR_SHEET_WEBHOOK_SECRET') + "';\n"
+      + "const CMS_PLUGIN_CALLBACK_TOKEN = '" + quote(token || 'YOUR_SHEET_CALLBACK_TOKEN') + "';\n"
       + "\n"
       + "function onCmsSheetEdit(e) {\n"
       + "  const range = e && e.range;\n"
@@ -914,7 +923,7 @@ const ADMIN_SCRIPT = String.raw`(function () {
       + "  UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {\n"
       + "    method: 'post',\n"
       + "    contentType: 'application/json',\n"
-      + "    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_WEBHOOK_SECRET },\n"
+      + "    headers: { 'x-sheet-webhook-secret': CMS_PLUGIN_CALLBACK_TOKEN },\n"
       + "    payload: JSON.stringify({\n"
       + "      spreadsheetId: SpreadsheetApp.getActive().getId(),\n"
       + "      pageType: sheet.getName(),\n"
@@ -940,7 +949,7 @@ const ADMIN_SCRIPT = String.raw`(function () {
     function update() {
       code.textContent = buildCode(
         host.value,
-        code.getAttribute('data-webhook-secret') || ''
+        code.getAttribute('data-callback-token') || ''
       );
     }
 
