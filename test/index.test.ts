@@ -546,25 +546,38 @@ describe('admin sync', () => {
   });
 
   it('exports only pages matching submitted criteria', async () => {
+    const cmsSearches: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(url);
-      if (parsed.hostname === 'cms.test' && parsed.pathname === '/__cms/pages') {
+      if (parsed.hostname === 'cms.test' && parsed.pathname === '/__cms/pages/search') {
+        cmsSearches.push(url);
+        expect(init?.method).toBe('POST');
+        const searchBody = JSON.parse(String(init?.body)) as {
+          page_type: string;
+          operator: string;
+          sort: string;
+          order: string;
+          criteria: Array<{ index: number; term: string; path: string }>;
+        };
+        expect(searchBody.page_type).toBe('guest');
+        expect(searchBody.operator).toBe('AND');
+        expect(searchBody.sort).toBe('updated_at');
+        expect(searchBody.order).toBe('DESC');
+        expect(searchBody.criteria).toEqual([{ index: 1, term: 'confirmed', path: 'status' }]);
         return Response.json({
-          total: 2,
+          total: 1,
           pages: [
             {
               id: 11, page_type: 'guest', name: 'Ada Guest', slug: 'ada', weight: 5,
               start: null, end: null, timezone: '+0800', page_id: null, updated_at: '2026-07-06',
               lect: { status: 'confirmed', name: { en: 'Ada' } },
             },
-            {
-              id: 12, page_type: 'guest', name: 'Grace Guest', slug: 'grace', weight: 5,
-              start: null, end: null, timezone: '+0800', page_id: null, updated_at: '2026-07-05',
-              lect: { status: 'declined', name: { en: 'Grace' } },
-            },
           ],
         });
+      }
+      if (parsed.hostname === 'cms.test' && parsed.pathname === '/__cms/pages') {
+        throw new Error('Criteria exports should use the CMS search API, not list-all filtering.');
       }
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/') && init?.method === 'PUT') {
         const payload = JSON.parse(String(init.body)) as { values: string[][] };
@@ -592,6 +605,7 @@ describe('admin sync', () => {
 
     expect(response.status).toBe(200);
     expect(html).toContain('1');
+    expect(cmsSearches).toHaveLength(1);
   });
 
   it('exports only selected preview columns', async () => {

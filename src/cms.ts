@@ -1,4 +1,4 @@
-import type { CmsPage, CmsPageInput, PluginEnv } from './types';
+import type { CmsPage, CmsPageInput, PluginEnv, SyncCriterion, SyncOperator, SyncOrder, SyncSort } from './types';
 
 export class CmsApiError extends Error {
   constructor(
@@ -47,6 +47,48 @@ export class CmsClient {
       if (pages.length >= result.total || result.pages.length === 0) break;
     }
     return pages;
+  }
+
+  async searchAll(pageType: string, options: {
+    limit: number;
+    criteria: SyncCriterion[];
+    operator: SyncOperator;
+    sort: SyncSort;
+    order: SyncOrder;
+  }): Promise<{ pages: CmsPage[]; total: number }> {
+    if (!options.criteria.length) {
+      const pages = await this.listAll(pageType, options.limit);
+      return { pages, total: pages.length };
+    }
+
+    const cap = Math.max(1, Math.floor(options.limit));
+    const batchSize = Math.min(cap, 500);
+    const pages: CmsPage[] = [];
+    let total = 0;
+
+    for (let page = 1; pages.length < cap; page += 1) {
+      const body = {
+        page_type: pageType,
+        limit: batchSize,
+        page,
+        operator: options.operator,
+        sort: options.sort,
+        order: options.order,
+        criteria: options.criteria.map((criterion) => ({
+          index: criterion.index,
+          term: criterion.term,
+          path: criterion.path,
+        })),
+      };
+
+      const path = '/pages/search';
+      const result = await this.json<{ pages: CmsPage[]; total: number }>(await this.call('POST', path, body), 'POST', path);
+      total = result.total;
+      pages.push(...result.pages);
+      if (pages.length >= result.total || result.pages.length === 0) break;
+    }
+
+    return { pages: pages.slice(0, cap), total };
   }
 
   async get(id: number): Promise<CmsPage> {

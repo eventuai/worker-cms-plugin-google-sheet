@@ -20,14 +20,13 @@ write-back API.
 - Creates page versions and hooks via the normal CMS `/__cms/pages/:id` API.
 - Sheet edits are pulled back when the plugin's **Import from Sheet** action is
   run. Google Sheets does not push edits to this Worker automatically.
-- Filters exports with advanced-search-style criteria:
+- Filters exports by delegating advanced-search-style criteria to the CMS search API:
   - `search1`, `path1`, `search2`, `path2`, etc.
   - `AND`, `OR`, and `NOT` operators
   - paths such as `status`, `_pointers.mail_list`, or `position[*].title`
   - sort by updated, created, name, weight, or ID
 
-Tag criteria from CMS advanced search are not included yet because the current
-CMS plugin page-list API does not return tag IDs for list results.
+Tag criteria from CMS advanced search are not included in this plugin form yet.
 
 ## Configuration
 

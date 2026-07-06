@@ -1,7 +1,7 @@
 import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
 import { SIGNATURE_COLUMN, callbackToken, hashIncludesSignature, pageHash, pageSignature, secureEquals } from './integrity';
-import { filterAndSortPages, parseCriteria, parseOperator, parseOrder, parseSort } from './search';
+import { parseCriteria, parseOperator, parseOrder, parseSort } from './search';
 import { pagesToSheetValues, sheetColumnsForPages, sheetRowsToUpdates, sheetValuesToUpdates } from './sheet-mapper';
 import type { RowUpdate } from './sheet-mapper';
 import type { CmsUser, ImportResult, PluginEnv, SheetCallbackPayload, SyncPreviewResult, SyncRequest, SyncResult } from './types';
@@ -128,13 +128,12 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
 async function previewExport(cms: CmsClient, sync: SyncRequest): Promise<SyncPreviewResult> {
   const results: SyncPreviewResult['pageTypes'] = [];
   for (const pageType of sync.pageTypes) {
-    const allPages = await cms.listAll(pageType, sync.limit);
-    const pages = filterAndSortPages(allPages, sync.criteria, sync.operator, sync.sort, sync.order);
+    const result = await cms.searchAll(pageType, sync);
     results.push({
       pageType,
-      total: allPages.length,
-      exported: pages.length,
-      columns: sheetColumnsForPages(pages, sync.language),
+      total: result.total,
+      exported: result.pages.length,
+      columns: sheetColumnsForPages(result.pages, sync.language),
     });
   }
   return { pageTypes: results };
@@ -169,12 +168,12 @@ async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: S
 
   const results: SyncResult['pageTypes'] = [];
   for (const pageType of sync.pageTypes) {
-    const allPages = await cms.listAll(pageType, sync.limit);
-    const pages = filterAndSortPages(allPages, sync.criteria, sync.operator, sync.sort, sync.order);
+    const result = await cms.searchAll(pageType, sync);
+    const pages = result.pages;
     const hashes = await Promise.all(pages.map((page) => pageHash(key, spreadsheetId, page)));
     const values = pagesToSheetValues(pages, sync.language, sync.selectedColumns?.[pageType], hashes);
     await sheets.writeValues(spreadsheetId, sheetTitleFor(pageType), values);
-    results.push({ pageType, total: allPages.length, exported: pages.length, columns: values[0]?.length ?? 0 });
+    results.push({ pageType, total: result.total, exported: pages.length, columns: values[0]?.length ?? 0 });
   }
 
   return { spreadsheetId, spreadsheetUrl: sheets.spreadsheetUrl(spreadsheetId), pageTypes: results };
