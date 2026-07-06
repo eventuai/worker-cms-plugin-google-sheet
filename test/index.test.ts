@@ -362,6 +362,8 @@ describe('admin sync', () => {
     expect(assetScript).toContain('cms-plugin-google-sheet.spreadsheetId');
     expect(assetScript).toContain('cms-plugin-google-sheet.pageTypes');
     expect(assetScript).toContain('localStorage.setItem');
+    expect(assetScript).toContain('data-sheet-copy-code');
+    expect(assetScript).toContain('navigator.clipboard.writeText');
     expect(assetScript).not.toContain('data-sheet-apps-script');
     expect(assetScript).not.toContain('SpreadsheetApp.getActive().getId()');
     expect(assetScript).not.toContain('rowNumbers: rowNumbers');
@@ -528,6 +530,10 @@ describe('admin sync', () => {
     expect(html).toContain('Published sheet URL');
     expect(html).toContain('https://docs.google.com/spreadsheets/d/sheet-123/edit');
     expect(html).toContain('Apps Script callback');
+    expect(html).toContain('data-sheet-copy-block');
+    expect(html).toContain('data-sheet-copy-code');
+    expect(html).toContain('Copy');
+    expect(html).toContain('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
     expect(html).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
     expect(html).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${await callbackToken('sheet-secret', 'sheet-123')}';`);
     expect(html).not.toContain("'sheet-secret'");

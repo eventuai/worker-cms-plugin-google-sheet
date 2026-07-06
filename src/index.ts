@@ -684,6 +684,7 @@ async function exportSummary(result: SyncResult, sync: SyncRequest, env: PluginE
     ${copyField('Published sheet URL', result.spreadsheetUrl)}
     ${copyCodeBlock('Apps Script callback', appScriptCode)}
     ${summaryTable(['Page type', 'Fetched', 'Exported', 'Columns'], result.pageTypes.map((item) => [item.pageType, String(item.total), String(item.exported), String(item.columns)]))}
+    <script src="/admin/plugins/${PLUGIN_ID}${ADMIN_SCRIPT_ASSET}" defer></script>
   </div>`;
 }
 
@@ -790,11 +791,17 @@ function copyField(label: string, value: string): string {
 }
 
 function copyCodeBlock(label: string, value: string): string {
-  return `<label class="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-    <span class="mb-2 block text-sm font-semibold text-gray-900">${esc(label)}</span>
-    <textarea readonly rows="18"
+  return `<div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm" data-sheet-copy-block>
+    <div class="mb-2 flex items-center justify-between gap-3">
+      <span class="block text-sm font-semibold text-gray-900">${esc(label)}</span>
+      <button type="button" data-sheet-copy-code
+        class="inline-flex h-8 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50">
+        Copy
+      </button>
+    </div>
+    <textarea readonly rows="18" data-sheet-copy-source
       class="block min-h-[22rem] w-full resize-y rounded-lg border border-gray-300 bg-gray-900 p-4 font-mono text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">${esc(value)}</textarea>
-  </label>`;
+  </div>`;
 }
 
 function notice(title: string, message: string, tone: 'green' | 'amber'): string {
@@ -976,6 +983,39 @@ const ADMIN_SCRIPT = String.raw`(function () {
 
   function bind(root) {
     FIELDS.forEach(function (field) { bindField(root, field); });
+    bindCopyButtons(root);
+  }
+
+  function copyText(text, source) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    source.focus();
+    source.select();
+    document.execCommand('copy');
+    return Promise.resolve();
+  }
+
+  function bindCopyButtons(root) {
+    var buttons = root.querySelectorAll('[data-sheet-copy-code]');
+    buttons.forEach(function (button) {
+      button.addEventListener('click', function () {
+        var block = button.closest('[data-sheet-copy-block]');
+        var source = block ? block.querySelector('[data-sheet-copy-source]') : null;
+        if (!source) return;
+
+        var originalText = button.textContent;
+        copyText(source.value, source).then(function () {
+          button.textContent = 'Copied';
+          window.setTimeout(function () { button.textContent = originalText || 'Copy'; }, 1600);
+        }).catch(function () {
+          source.focus();
+          source.select();
+          button.textContent = 'Select text';
+          window.setTimeout(function () { button.textContent = originalText || 'Copy'; }, 2200);
+        });
+      });
+    });
   }
 
   if (document.readyState === 'loading') {
