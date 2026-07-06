@@ -82,7 +82,13 @@ export function flattenLect(lect: Record<string, unknown>, language: string): Fl
   return out;
 }
 
-function flattenObject(value: Record<string, unknown>, prefix: string, out: FlatLect, language: string): void {
+function flattenObject(
+  value: Record<string, unknown>,
+  prefix: string,
+  out: FlatLect,
+  language: string,
+  opts: { includePrivate?: boolean } = {},
+): void {
   for (const [key, entry] of Object.entries(value)) {
     if (key === '_pointers') {
       if (isPlainObject(entry)) {
@@ -93,12 +99,25 @@ function flattenObject(value: Record<string, unknown>, prefix: string, out: Flat
       continue;
     }
 
-    if (key === '_blocks' || key === '_tags') {
+    if (key === '_blocks') {
+      if (Array.isArray(entry)) {
+        entry.forEach((block, index) => {
+          if (isPlainObject(block)) {
+            flattenObject(block, `${prefix}@_blocks[${index}]`, out, language, { includePrivate: true });
+          }
+        });
+      } else {
+        out[`${prefix}@_blocks_json`] = JSON.stringify(entry ?? []);
+      }
+      continue;
+    }
+
+    if (key === '_tags') {
       out[`${prefix}@${key}_json`] = JSON.stringify(entry ?? []);
       continue;
     }
 
-    if (key.startsWith('_')) continue;
+    if (key.startsWith('_') && !opts.includePrivate) continue;
 
     if (Array.isArray(entry)) {
       entry.forEach((item, index) => {
@@ -129,9 +148,24 @@ export function unflattenLect(flat: FlatLect, language: string): Record<string, 
   const lect: Record<string, unknown> = {};
   for (const [name, raw] of Object.entries(flat)) {
     if (!isLectColumn(name)) continue;
+    if (applyBlockField(lect, name, raw, language)) continue;
     applyField(lect, name, raw, language);
   }
   return lect;
+}
+
+function applyBlockField(lect: Record<string, unknown>, name: string, raw: string, language: string): boolean {
+  const match = name.match(/^@_blocks\[(\d+)](.+)$/);
+  if (!match) return false;
+  const index = Number(match[1]);
+  const rest = match[2];
+  if (!rest || !Number.isInteger(index) || index < 0) return true;
+
+  const blocks = Array.isArray(lect._blocks) ? lect._blocks as Record<string, unknown>[] : [];
+  lect._blocks = blocks;
+  blocks[index] = isPlainObject(blocks[index]) ? blocks[index] : {};
+  applyField(blocks[index], rest, raw, language);
+  return true;
 }
 
 function applyField(lect: Record<string, unknown>, name: string, raw: string, language: string): void {
@@ -187,7 +221,11 @@ function isLocalizedMap(value: unknown): value is Record<string, unknown> {
   if (!isPlainObject(value)) return false;
   const keys = Object.keys(value);
   if (!keys.length) return false;
-  return keys.every((key) => /^[a-z]{2}(?:-[a-z0-9]+)?$/i.test(key) && isScalar(value[key]));
+  return keys.every((key) => isLanguageKey(key) && isScalar(value[key]));
+}
+
+function isLanguageKey(key: string): boolean {
+  return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(key);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

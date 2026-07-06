@@ -8,6 +8,7 @@ export interface PluginEnv {
   GOOGLE_PRIVATE_KEY?: string;
   GOOGLE_PRIVATE_KEY_ID?: string;
   GOOGLE_IMPERSONATE_EMAIL?: string;
+  SHEET_WEBHOOK_SECRET?: string;
 }
 
 export interface CmsPage {
@@ -37,6 +38,7 @@ export interface CmsPageInput {
   timezone?: string | null;
   page_id?: number | null;
   lect?: Record<string, unknown>;
+  version_action?: string;
 }
 
 export interface CmsUser {
@@ -52,16 +54,40 @@ export interface SyncRequest {
   pageTypes: string[];
   language: string;
   limit: number;
+  criteria: SyncCriterion[];
+  operator: SyncOperator;
+  sort: SyncSort;
+  order: SyncOrder;
+}
+
+export type SyncOperator = 'AND' | 'OR' | 'NOT';
+export type SyncSort = 'updated_at' | 'created_at' | 'name' | 'weight' | 'id';
+export type SyncOrder = 'ASC' | 'DESC';
+
+export interface SyncCriterion {
+  index: number;
+  term: string;
+  path: string;
 }
 
 export interface SyncResult {
   spreadsheetId: string;
   spreadsheetUrl: string;
-  pageTypes: Array<{ pageType: string; count: number; columns: number }>;
+  pageTypes: Array<{ pageType: string; total: number; exported: number; columns: number }>;
 }
 
 export interface ImportResult {
   spreadsheetId: string;
   spreadsheetUrl: string;
   pageTypes: Array<{ pageType: string; rows: number; updated: number; skipped: number; errors: string[] }>;
+  ok: boolean;
+}
+
+export interface SheetCallbackPayload {
+  spreadsheetId?: unknown;
+  pageTypes?: unknown;
+  pageType?: unknown;
+  sheetName?: unknown;
+  language?: unknown;
+  limit?: unknown;
 }

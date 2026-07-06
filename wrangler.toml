@@ -9,8 +9,9 @@ compatibility_flags = ["nodejs_compat"]
 #
 # Comma-separated page types this plugin declares for delegated read/write.
 # Each type must also be approved from the CMS plugin management UI before the
-# CMS write-back API will allow it.
-# SYNC_PAGE_TYPES = "contact,event,guest"
+# CMS write-back API will allow it. Use "*" to declare all page types (the host
+# still enforces its own per-type approvals).
+SYNC_PAGE_TYPES = "*"
 #
 # Optional default language for localized lect columns.
 DEFAULT_LANGUAGE = "en"
@@ -19,6 +20,7 @@ DEFAULT_LANGUAGE = "en"
 #   wrangler secret put PLUGIN_SECRET
 #   wrangler secret put GOOGLE_SERVICE_ACCOUNT_EMAIL
 #   wrangler secret put GOOGLE_PRIVATE_KEY
+#   wrangler secret put SHEET_WEBHOOK_SECRET
 #
 # Share the target spreadsheet with GOOGLE_SERVICE_ACCOUNT_EMAIL, or let the
 # plugin create a new spreadsheet owned by that service account.
