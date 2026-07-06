@@ -12,6 +12,8 @@ CMS_URL = "https://cms.eventuai.com"
 # CMS write-back API will allow it. Use "*" to declare all page types (the host
 # still enforces its own per-type approvals).
 SYNC_PAGE_TYPES = "*"
+GOOGLE_PRIVATE_KEY_ID = "4966b94bf547ac00ffd52cb92367de70c5a5fe4b"
+GOOGLE_SERVICE_ACCOUNT_EMAIL = "id-xcms-sheets-sync@xcms-500715.iam.gserviceaccount.com"
 #
 # Optional default language for localized lect columns.
 # DEFAULT_LANGUAGE = "en"
