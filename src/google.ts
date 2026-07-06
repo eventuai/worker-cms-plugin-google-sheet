@@ -76,6 +76,29 @@ export class GoogleSheetsClient {
     );
   }
 
+  // Reads the header row plus only the given 1-based data rows in one
+  // batchGet, instead of the whole sheet. Used by the edit-trigger callback so
+  // a one-cell edit re-reads one row, not thousands.
+  async readRows(spreadsheetId: string, sheetTitle: string, rowNumbers: number[]): Promise<{ headers: string[]; rows: Array<{ rowNumber: number; cells: string[] }> }> {
+    const wanted = [...new Set(rowNumbers)].filter((value) => Number.isInteger(value) && value >= 2).sort((left, right) => left - right);
+    if (!wanted.length) return { headers: [], rows: [] };
+    const title = quoteSheetTitle(sheetTitle);
+    const params = new URLSearchParams({ majorDimension: 'ROWS' });
+    params.append('ranges', `${title}!1:1`);
+    for (const rowNumber of wanted) params.append('ranges', `${title}!${rowNumber}:${rowNumber}`);
+    const response = await this.googleFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchGet?${params}`,
+    );
+    const result = await response.json() as { valueRanges?: Array<{ values?: unknown[][] }> };
+    const valueRanges = result.valueRanges ?? [];
+    const headers = (valueRanges[0]?.values?.[0] ?? []).map((cell) => String(cell ?? ''));
+    const rows = wanted.map((rowNumber, index) => ({
+      rowNumber,
+      cells: (valueRanges[index + 1]?.values?.[0] ?? []).map((cell) => String(cell ?? '')),
+    }));
+    return { headers, rows };
+  }
+
   async readValues(spreadsheetId: string, sheetTitle: string): Promise<string[][]> {
     const range = `${quoteSheetTitle(sheetTitle)}!A:ZZ`;
     const response = await this.googleFetch(

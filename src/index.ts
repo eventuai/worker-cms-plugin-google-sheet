@@ -2,11 +2,15 @@ import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
 import { HASH_COLUMN, callbackToken, pageHash, secureEquals } from './integrity';
 import { filterAndSortPages, parseCriteria, parseOperator, parseOrder, parseSort } from './search';
-import { pagesToSheetValues, sheetColumnsForPages, sheetValuesToUpdates } from './sheet-mapper';
+import { pagesToSheetValues, sheetColumnsForPages, sheetRowsToUpdates, sheetValuesToUpdates } from './sheet-mapper';
+import type { RowUpdate } from './sheet-mapper';
 import type { CmsUser, ImportResult, PluginEnv, SheetCallbackPayload, SyncPreviewResult, SyncRequest, SyncResult } from './types';
 
 const PLUGIN_ID = 'google-sheet';
 const ADMIN_SCRIPT_ASSET = '/assets/sheet-sync-admin.js';
+// Upper bound on rows re-read per edit callback, so an unusually large edit
+// range cannot fan out into an unbounded number of CMS subrequests.
+const MAX_CALLBACK_ROWS = 200;
 
 export default {
   async fetch(request: Request, env: PluginEnv): Promise<Response> {
@@ -181,24 +185,35 @@ async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: S
 // mismatch means the page changed since the export (or the token was forged
 // or copied from another spreadsheet), so the row is skipped as a conflict.
 // After a successful update the cell is refreshed with the new token so the
-// sheet stays importable.
+// sheet stays importable. The edit-trigger callback re-reads only the rows it
+// reported as changed; the admin action re-reads the whole sheet. In both
+// cases row content comes from the sheet, never from the caller.
 async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: SyncRequest, env: PluginEnv): Promise<ImportResult> {
   if (!sync.spreadsheetId) throw new GoogleSheetsError('Paste a spreadsheet id before importing.', 400);
   const key = integrityKey(env);
 
   const results: ImportResult['pageTypes'] = [];
   for (const pageType of sync.pageTypes) {
-    const values = await sheets.readValues(sync.spreadsheetId, sheetTitleFor(pageType));
-    const hashColumn = (values[0] ?? []).findIndex((header) => header.trim() === HASH_COLUMN);
-    const updates = sheetValuesToUpdates(values, pageType, sync.language);
+    const title = sheetTitleFor(pageType);
+    let headerRow: string[];
+    let updates: RowUpdate[];
+    if (sync.rowNumbers?.length) {
+      const { headers, rows } = await sheets.readRows(sync.spreadsheetId, title, sync.rowNumbers);
+      headerRow = headers;
+      updates = sheetRowsToUpdates(headers, rows, pageType, sync.language);
+    } else {
+      const values = await sheets.readValues(sync.spreadsheetId, title);
+      headerRow = values[0] ?? [];
+      updates = sheetValuesToUpdates(values, pageType, sync.language);
+    }
+    const hashColumn = headerRow.findIndex((header) => header.trim() === HASH_COLUMN);
     let updated = 0;
     let skipped = 0;
     const errors: string[] = [];
     const renewals: Array<{ row: number; column: number; value: string }> = [];
 
-    for (let index = 0; index < updates.length; index += 1) {
-      const update = updates[index];
-      const rowNumber = index + 2;
+    for (const update of updates) {
+      const { rowNumber } = update;
       if (update.id === null || update.error) {
         skipped += 1;
         errors.push(`Row ${rowNumber}: ${update.error ?? 'invalid row'}`);
@@ -233,7 +248,7 @@ async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync:
       }
     }
 
-    await sheets.updateCells(sync.spreadsheetId, sheetTitleFor(pageType), renewals);
+    await sheets.updateCells(sync.spreadsheetId, title, renewals);
     results.push({ pageType, rows: updates.length, updated, skipped, errors });
   }
 
@@ -291,7 +306,20 @@ function syncRequestFromCallback(payload: SheetCallbackPayload | null, env: Plug
     operator: 'AND',
     sort: 'updated_at',
     order: 'DESC',
+    rowNumbers: callbackRowNumbers(payload),
   };
+}
+
+// The rows the trigger says changed. Absent or unparseable -> undefined, which
+// makes the import fall back to reading the whole sheet (so triggers installed
+// before row targeting existed keep working).
+function callbackRowNumbers(payload: SheetCallbackPayload): number[] | undefined {
+  if (!Array.isArray(payload.rowNumbers)) return undefined;
+  const numbers = payload.rowNumbers
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value >= 2);
+  const unique = [...new Set(numbers)].sort((left, right) => left - right);
+  return unique.length ? unique.slice(0, MAX_CALLBACK_ROWS) : undefined;
 }
 
 function selectedColumnsFromForm(form: FormData, pageTypes: string[]): Record<string, string[]> | undefined {
@@ -865,9 +893,12 @@ const CMS_PLUGIN_CALLBACK_TOKEN = '${jsString(opts.callbackToken)}';
 function onCmsSheetEdit(e) {
   const range = e && e.range;
   if (!range) return;
-  // Ignore edits that only touch the header row.
-  if (range.getRow() + range.getNumRows() - 1 < 2) return;
   const sheet = range.getSheet();
+  const firstRow = Math.max(range.getRow(), 2);
+  const lastRow = range.getRow() + range.getNumRows() - 1;
+  if (lastRow < firstRow) return; // only the header row changed
+  const rowNumbers = [];
+  for (var row = firstRow; row <= lastRow; row++) rowNumbers.push(row);
   UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {
     method: 'post',
     contentType: 'application/json',
@@ -875,7 +906,8 @@ function onCmsSheetEdit(e) {
     payload: JSON.stringify({
       spreadsheetId: SpreadsheetApp.getActive().getId(),
       pageType: sheet.getName(),
-      sheetName: sheet.getName()
+      sheetName: sheet.getName(),
+      rowNumbers: rowNumbers
     }),
     muteHttpExceptions: true
   });
@@ -917,9 +949,12 @@ const ADMIN_SCRIPT = String.raw`(function () {
       + "function onCmsSheetEdit(e) {\n"
       + "  const range = e && e.range;\n"
       + "  if (!range) return;\n"
-      + "  // Ignore edits that only touch the header row.\n"
-      + "  if (range.getRow() + range.getNumRows() - 1 < 2) return;\n"
       + "  const sheet = range.getSheet();\n"
+      + "  const firstRow = Math.max(range.getRow(), 2);\n"
+      + "  const lastRow = range.getRow() + range.getNumRows() - 1;\n"
+      + "  if (lastRow < firstRow) return; // only the header row changed\n"
+      + "  const rowNumbers = [];\n"
+      + "  for (var row = firstRow; row <= lastRow; row++) rowNumbers.push(row);\n"
       + "  UrlFetchApp.fetch(CMS_PLUGIN_CALLBACK_URL, {\n"
       + "    method: 'post',\n"
       + "    contentType: 'application/json',\n"
@@ -927,7 +962,8 @@ const ADMIN_SCRIPT = String.raw`(function () {
       + "    payload: JSON.stringify({\n"
       + "      spreadsheetId: SpreadsheetApp.getActive().getId(),\n"
       + "      pageType: sheet.getName(),\n"
-      + "      sheetName: sheet.getName()\n"
+      + "      sheetName: sheet.getName(),\n"
+      + "      rowNumbers: rowNumbers\n"
       + "    }),\n"
       + "    muteHttpExceptions: true\n"
       + "  });\n"

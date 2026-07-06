@@ -170,6 +170,17 @@ describe('sheet mapper', () => {
     expect(update.input.lect).toEqual({ status: 'confirmed' });
   });
 
+  it('keeps each update anchored to its real sheet row across blank rows', () => {
+    const updates = sheetValuesToUpdates([
+      ['id', 'name', '_hash'],
+      ['11', 'Row two', 'a'],
+      ['', '', ''],
+      ['13', 'Row four', 'c'],
+    ], 'guest', 'en');
+
+    expect(updates.map((update) => update.rowNumber)).toEqual([2, 4]);
+  });
+
   it('limits exported sheet values to selected columns while keeping id', () => {
     const values = pagesToSheetValues([{
       id: 11,
@@ -280,7 +291,10 @@ describe('admin sync', () => {
     expect(data.appScriptCode).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${token}';`);
     expect(data.appScriptCode).toContain('spreadsheetId: SpreadsheetApp.getActive().getId()');
     expect(data.appScriptCode).toContain('sheetName: sheet.getName()');
-    expect(data.appScriptCode).not.toContain('rows:');
+    expect(data.appScriptCode).toContain('rowNumbers: rowNumbers');
+    // The script reports which rows changed, never their content, so it must
+    // not read cell values.
+    expect(data.appScriptCode).not.toContain('getValues');
     expect(data.appScriptCode).not.toContain('CMS_PLUGIN_LANGUAGE');
     expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
   });
@@ -331,7 +345,8 @@ describe('admin sync', () => {
     expect(assetScript).toContain('cms-plugin-google-sheet.pluginHost');
     expect(assetScript).toContain('localStorage.setItem');
     expect(assetScript).toContain('SpreadsheetApp.getActive().getId()');
-    expect(assetScript).not.toContain('rows: rows');
+    expect(assetScript).toContain('rowNumbers: rowNumbers');
+    expect(assetScript).not.toContain('getValues');
     expect(assetScript).not.toContain('CMS_PLUGIN_LANGUAGE');
   });
 
@@ -976,6 +991,62 @@ describe('admin sync', () => {
 
     expect(response.status).toBe(200);
     expect(cmsUpdates).toEqual(['11']);
+  });
+
+  it('re-reads only the rows a callback reports as changed, via batchGet', async () => {
+    const rowHash = await guestRowHash();
+    let batchGetRanges: string[] = [];
+    let fullSheetReads = 0;
+    let renewedRange = '';
+    const cmsUpdates: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const parsed = new URL(url);
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
+        batchGetRanges = parsed.searchParams.getAll('ranges');
+        return Response.json({
+          valueRanges: [
+            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
+          ],
+        });
+      }
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchUpdate')) {
+        const payload = JSON.parse(String(init?.body)) as { data: Array<{ range: string }> };
+        renewedRange = payload.data[0]?.range ?? '';
+        return Response.json({});
+      }
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
+        fullSheetReads += 1;
+        return Response.json({ values: [] });
+      }
+      const pageMatch = parsed.pathname.match(/^\/__cms\/pages\/(\d+)$/);
+      if (parsed.hostname === 'cms.test' && pageMatch && init?.method === 'PUT') {
+        cmsUpdates.push(pageMatch[1]);
+        return Response.json({ page: guestPage });
+      }
+      if (parsed.hostname === 'cms.test' && pageMatch) {
+        return Response.json({ page: guestPage });
+      }
+      return Response.json({});
+    }));
+
+    const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
+      },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [5, 5, 1] }),
+    }), env());
+
+    expect(response.status).toBe(200);
+    expect(fullSheetReads).toBe(0);
+    // Header row plus the one changed data row (deduped, header-row 1 dropped).
+    expect(batchGetRanges).toEqual(["'guest'!1:1", "'guest'!5:5"]);
+    expect(cmsUpdates).toEqual(['11']);
+    // _hash is column 4 (D); the renewal must target the actual changed row 5.
+    expect(renewedRange).toBe("'guest'!D5");
   });
 
   it('rejects a token issued for a different spreadsheet', async () => {

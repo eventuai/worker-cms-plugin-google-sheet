@@ -60,6 +60,10 @@ export interface SyncRequest {
   sort: SyncSort;
   order: SyncOrder;
   selectedColumns?: Record<string, string[]>;
+  // Set by the edit-trigger callback to the 1-based sheet rows that changed,
+  // so only those rows are re-read and imported. Absent for the admin
+  // "Import from Sheet" action, which imports the whole sheet.
+  rowNumbers?: number[];
 }
 
 export type SyncOperator = 'AND' | 'OR' | 'NOT';
@@ -89,12 +93,15 @@ export interface ImportResult {
   ok: boolean;
 }
 
-// Notification-only payload from the Apps Script edit trigger. Row content is
-// deliberately absent from this contract - the plugin re-reads the sheet.
+// Notification-only payload from the Apps Script edit trigger: which
+// spreadsheet, which tab, and which rows changed. Row *content* is
+// deliberately absent from this contract - the plugin re-reads it from the
+// sheet, so the payload can only point at rows, never inject their values.
 export interface SheetCallbackPayload {
   spreadsheetId?: unknown;
   pageTypes?: unknown;
   pageType?: unknown;
   sheetName?: unknown;
   language?: unknown;
+  rowNumbers?: unknown;
 }

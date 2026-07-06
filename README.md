@@ -76,10 +76,16 @@ https://YOUR_PLUGIN_HOST/__plugin/sheets/callback
 
 The callback authenticates with the `x-sheet-webhook-secret` header (a
 `?secret=` query parameter is not accepted — it would leak into access logs).
-The payload is a notification only: `spreadsheetId` plus the tab name. Any row
-data in the payload is ignored; the plugin always re-reads the spreadsheet
-through the Sheets API and applies the same verified import logic used by
-**Import from Sheet**.
+The payload is a notification only: `spreadsheetId`, the tab name, and
+`rowNumbers` — the 1-based rows the edit touched. The plugin re-reads **only
+those rows** from the spreadsheet through the Sheets API (a one-cell edit
+re-reads one row, not the whole sheet) and applies the same verified import
+logic used by **Import from Sheet**. Row *content* is never taken from the
+payload — `rowNumbers` only points at rows, so a caller holding the token can
+at most trigger a re-import of rows that are already in the sheet, all
+`_hash`-verified. A callback without `rowNumbers` (e.g. an older trigger)
+falls back to re-reading the whole tab. At most `200` rows are processed per
+callback.
 
 ### Callback tokens (how the secret is shared with Apps Script)
 

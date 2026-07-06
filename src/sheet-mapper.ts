@@ -51,48 +51,71 @@ function selectedSheetColumns(allColumns: string[], selectedColumns: string[] | 
   return columns.length ? columns : ['id'];
 }
 
-export function sheetValuesToUpdates(values: string[][], pageType: string, language: string): Array<{
+export interface SheetRow {
+  rowNumber: number;
+  cells: string[];
+}
+
+export interface RowUpdate {
+  rowNumber: number;
   id: number | null;
   input: CmsPageInput;
   hash: string | null;
   error?: string;
-}> {
+}
+
+// Maps a full sheet matrix (header row + contiguous data rows starting at
+// sheet row 2) to per-row updates. Used by the admin "Import from Sheet"
+// action, which imports the entire sheet.
+export function sheetValuesToUpdates(values: string[][], pageType: string, language: string): RowUpdate[] {
   const [headerRow, ...dataRows] = values;
   if (!headerRow?.length) return [];
+  const rows = dataRows.map((cells, index) => ({ rowNumber: index + 2, cells }));
+  return sheetRowsToUpdates(headerRow, rows, pageType, language);
+}
+
+// Maps specific numbered rows to updates. Used by the edit-trigger callback,
+// which re-reads only the rows the Apps Script reported as changed. Each
+// update keeps its absolute sheet row number so error messages and _hash
+// renewals target the right cell even when the rows are non-contiguous.
+export function sheetRowsToUpdates(headerRow: string[], rows: SheetRow[], pageType: string, language: string): RowUpdate[] {
+  if (!headerRow?.length) return [];
   const headers = headerRow.map((value) => value.trim());
-  return dataRows
-    .filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''))
-    .map((row) => {
-      const record: Record<string, string> = {};
-      headers.forEach((header, index) => {
-        if (header) record[header] = String(row[index] ?? '');
-      });
+  return rows
+    .filter((row) => row.cells.some((cell) => String(cell ?? '').trim() !== ''))
+    .map((row) => ({ rowNumber: row.rowNumber, ...buildRowUpdate(headers, row.cells, pageType, language) }));
+}
 
-      const hash = record[HASH_COLUMN]?.trim() || null;
-      const id = parseId(record.id);
-      if (id === null) return { id, input: {}, hash, error: 'missing_or_invalid_id' };
+function buildRowUpdate(headers: string[], cells: string[], pageType: string, language: string): Omit<RowUpdate, 'rowNumber'> {
+  const record: Record<string, string> = {};
+  headers.forEach((header, index) => {
+    if (header) record[header] = String(cells[index] ?? '');
+  });
 
-      const lectColumns: FlatLect = {};
-      for (const [key, value] of Object.entries(record)) {
-        if (BASE_COLUMNS.includes(key) || READONLY_COLUMNS.has(key)) continue;
-        if (isLectColumn(key)) lectColumns[key] = value;
-      }
+  const hash = record[HASH_COLUMN]?.trim() || null;
+  const id = parseId(record.id);
+  if (id === null) return { id, input: {}, hash, error: 'missing_or_invalid_id' };
 
-      const input: CmsPageInput = {
-        // The sheet tab decides the page type; a page_type cell in the row is
-        // ignored so an edited cell cannot retype (or hijack) another page.
-        page_type: pageType,
-        name: record.name || undefined,
-        slug: record.slug || undefined,
-        weight: parseOptionalNumber(record.weight),
-        start: nullable(record.start),
-        end: nullable(record.end),
-        timezone: nullable(record.timezone),
-        page_id: parseOptionalNumber(record.page_id),
-        lect: unflattenLect(lectColumns, language),
-      };
-      return { id, input: pruneUndefined(input), hash };
-    });
+  const lectColumns: FlatLect = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (BASE_COLUMNS.includes(key) || READONLY_COLUMNS.has(key)) continue;
+    if (isLectColumn(key)) lectColumns[key] = value;
+  }
+
+  const input: CmsPageInput = {
+    // The sheet tab decides the page type; a page_type cell in the row is
+    // ignored so an edited cell cannot retype (or hijack) another page.
+    page_type: pageType,
+    name: record.name || undefined,
+    slug: record.slug || undefined,
+    weight: parseOptionalNumber(record.weight),
+    start: nullable(record.start),
+    end: nullable(record.end),
+    timezone: nullable(record.timezone),
+    page_id: parseOptionalNumber(record.page_id),
+    lect: unflattenLect(lectColumns, language),
+  };
+  return { id, input: pruneUndefined(input), hash };
 }
 
 function pageToRow(page: CmsPage, language: string): Record<string, string> {
