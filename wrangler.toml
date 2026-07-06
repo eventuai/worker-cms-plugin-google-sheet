@@ -1,0 +1,24 @@
+name = "worker-cms-plugin-google-sheet"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Base URL of the CMS Worker, for the /__cms page read/write API.
+# CMS_URL = "https://cms.example.com"
+#
+# Comma-separated page types this plugin declares for delegated read/write.
+# Each type must also be approved from the CMS plugin management UI before the
+# CMS write-back API will allow it.
+# SYNC_PAGE_TYPES = "contact,event,guest"
+#
+# Optional default language for localized lect columns.
+DEFAULT_LANGUAGE = "en"
+
+# Secrets:
+#   wrangler secret put PLUGIN_SECRET
+#   wrangler secret put GOOGLE_SERVICE_ACCOUNT_EMAIL
+#   wrangler secret put GOOGLE_PRIVATE_KEY
+#
+# Share the target spreadsheet with GOOGLE_SERVICE_ACCOUNT_EMAIL, or let the
+# plugin create a new spreadsheet owned by that service account.
