@@ -1,8 +1,8 @@
-import { HASH_COLUMN } from './integrity';
+import { SIGNATURE_COLUMN, pageSignature } from './integrity';
 import type { CmsPage, CmsPageInput } from './types';
 
 const BASE_COLUMNS = ['id', 'page_type', 'name', 'slug', 'weight', 'start', 'end', 'timezone', 'page_id', 'updated_at'];
-const READONLY_COLUMNS = new Set(['updated_at', HASH_COLUMN]);
+const READONLY_COLUMNS = new Set(['updated_at', SIGNATURE_COLUMN]);
 
 type FlatLect = Record<string, string>;
 
@@ -11,16 +11,16 @@ export function sheetColumnsForPages(pages: CmsPage[], language: string): string
   return columnsForRows(rows);
 }
 
-// `hashes` must align with `pages`; when provided, a trailing _hash column is
-// added so imports can verify each row against the current CMS state.
+// `hashes` must align with `pages`; when provided, a trailing _signature
+// column is added so imports can verify each row against the current CMS state.
 export function pagesToSheetValues(pages: CmsPage[], language: string, selectedColumns?: string[], hashes?: string[]): string[][] {
   const rows = pages.map((page) => pageToRow(page, language));
   const allColumns = columnsForRows(rows);
   const columns = selectedSheetColumns(allColumns, selectedColumns);
   if (!hashes) return [columns, ...rows.map((row) => columns.map((column) => row[column] ?? ''))];
   return [
-    [...columns, HASH_COLUMN],
-    ...rows.map((row, index) => [...columns.map((column) => row[column] ?? ''), hashes[index] ?? '']),
+    [...columns, SIGNATURE_COLUMN],
+    ...rows.map((row, index) => [...columns.map((column) => row[column] ?? ''), hashes[index] ? pageSignature(hashes[index]) : '']),
   ];
 }
 
@@ -60,7 +60,7 @@ export interface RowUpdate {
   rowNumber: number;
   id: number | null;
   input: CmsPageInput;
-  hash: string | null;
+  signature: string | null;
   error?: string;
 }
 
@@ -76,7 +76,7 @@ export function sheetValuesToUpdates(values: string[][], pageType: string, langu
 
 // Maps specific numbered rows to updates. Used by the edit-trigger callback,
 // which re-reads only the rows the Apps Script reported as changed. Each
-// update keeps its absolute sheet row number so error messages and _hash
+// update keeps its absolute sheet row number so error messages and _signature
 // renewals target the right cell even when the rows are non-contiguous.
 export function sheetRowsToUpdates(headerRow: string[], rows: SheetRow[], pageType: string, language: string): RowUpdate[] {
   if (!headerRow?.length) return [];
@@ -92,9 +92,9 @@ function buildRowUpdate(headers: string[], cells: string[], pageType: string, la
     if (header) record[header] = String(cells[index] ?? '');
   });
 
-  const hash = record[HASH_COLUMN]?.trim() || null;
+  const signature = record[SIGNATURE_COLUMN]?.trim() || null;
   const id = parseId(record.id);
-  if (id === null) return { id, input: {}, hash, error: 'missing_or_invalid_id' };
+  if (id === null) return { id, input: {}, signature, error: 'missing_or_invalid_id' };
 
   const lectColumns: FlatLect = {};
   for (const [key, value] of Object.entries(record)) {
@@ -115,7 +115,7 @@ function buildRowUpdate(headers: string[], cells: string[], pageType: string, la
     page_id: parseOptionalNumber(record.page_id),
     lect: unflattenLect(lectColumns, language),
   };
-  return { id, input: pruneUndefined(input), hash };
+  return { id, input: pruneUndefined(input), signature };
 }
 
 function pageToRow(page: CmsPage, language: string): Record<string, string> {

@@ -1,13 +1,15 @@
 import type { CmsPage } from './types';
 
-// Column that carries the per-row integrity token in exported sheets. The
-// token is an HMAC (keyed on PLUGIN_SECRET) over the page state at export
-// time plus the spreadsheet id, so at import time it serves three purposes:
+// Column that carries the visible per-row integrity signature in exported
+// sheets. It is a short slice of an HMAC (keyed on PLUGIN_SECRET) over the
+// page state at export time plus the spreadsheet id, so at import time it
+// serves three purposes:
 // optimistic concurrency (the CMS page changed since export -> mismatch),
-// tamper resistance (sheet editors cannot mint tokens for arbitrary pages),
-// and spreadsheet binding (tokens copied into a different spreadsheet fail,
+// tamper resistance (sheet editors cannot mint signatures for arbitrary pages),
+// and spreadsheet binding (signatures copied into a different spreadsheet fail,
 // because the spreadsheet id is part of the signed material).
-export const HASH_COLUMN = '_hash';
+export const SIGNATURE_COLUMN = '_signature';
+export const SIGNATURE_LENGTH = 10;
 
 export async function pageHash(key: string, spreadsheetId: string, page: CmsPage): Promise<string> {
   // Hash an explicit field list rather than the whole page object so list,
@@ -27,6 +29,14 @@ export async function pageHash(key: string, spreadsheetId: string, page: CmsPage
     lect: page.lect ?? {},
   });
   return hmacBase64Url(key, material);
+}
+
+export function pageSignature(hash: string): string {
+  return hash.slice(0, SIGNATURE_LENGTH);
+}
+
+export function hashIncludesSignature(hash: string, signature: string): boolean {
+  return signature.length === SIGNATURE_LENGTH && hash.includes(signature);
 }
 
 // Credential the generated Apps Script sends with edit callbacks. It is

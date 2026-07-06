@@ -83,7 +83,7 @@ re-reads one row, not the whole sheet) and applies the same verified import
 logic used by **Import from Sheet**. Row *content* is never taken from the
 payload — `rowNumbers` only points at rows, so a caller holding the token can
 at most trigger a re-import of rows that are already in the sheet, all
-`_hash`-verified. A callback must include `rowNumbers`; at most `200` rows are
+`_signature`-verified. A callback must include `rowNumbers`; at most `200` rows are
 processed per callback.
 
 ### Callback tokens (how the secret is shared with Apps Script)
@@ -102,30 +102,32 @@ ID is set, and the export-complete page always includes it — so editors can
 set up their own triggers without an admin handing them any global credential.
 A leaked token only authorizes callbacks for that one spreadsheet (which the
 holder could already edit), and even then only triggers a re-import of the
-sheet's own `_hash`-verified content. Rotating `SHEET_WEBHOOK_SECRET`
+sheet's own `_signature`-verified content. Rotating `SHEET_WEBHOOK_SECRET`
 invalidates every issued token.
 
-## Row integrity (`_hash`)
+## Row integrity (`_signature`)
 
-Every exported row carries a trailing `_hash` column: an HMAC-SHA256 token
-(keyed on `PLUGIN_SECRET`) over the page's exported state plus the spreadsheet
-id. On import, each row is verified before it is written:
+Every exported row carries a trailing `_signature` column: the first 10
+characters of an HMAC-SHA256 hash (keyed on `PLUGIN_SECRET`) over the page's
+exported state plus the spreadsheet id. On import, each row is verified before
+it is written:
 
-1. The current page is fetched from the CMS and its token recomputed.
-2. If the tokens differ, the row is skipped and reported as a conflict — the
-   page changed in the CMS after the export (or the token was forged/copied
-   from another spreadsheet). Re-export to pick up the current state.
-3. If they match, the update is applied and the `_hash` cell is refreshed with
-   a token for the new state, so the sheet stays importable.
+1. The current page is fetched from the CMS and its full hash is recomputed.
+2. If the full hash does not contain the row signature, the row is skipped and
+   reported as a conflict — the page changed in the CMS after the export (or
+   the signature was forged/copied from another spreadsheet). Re-export to pick
+   up the current state.
+3. If they match, the update is applied and the `_signature` cell is refreshed with
+   a 10-character signature for the new state, so the sheet stays importable.
 
-Rows without a `_hash` are skipped (sheets exported before this feature must be
-re-exported once). The token also pins each row to its page id and spreadsheet:
+Rows without a `_signature` are skipped (sheets exported before this feature must be
+re-exported once). The signature also pins each row to its page id and spreadsheet:
 retyping the `id` cell, editing the `page_type` cell (the tab name decides the
 type), copying rows into another spreadsheet, or replaying an old callback all
 fail verification instead of overwriting CMS content. Rotating `PLUGIN_SECRET`
-invalidates all outstanding sheet tokens.
+invalidates all outstanding sheet signatures.
 
-Do not edit or delete the `_hash` column in the spreadsheet.
+Do not edit or delete the `_signature` column in the spreadsheet.
 
 The plugin admin page includes a **Plugin host** input beside the Apps Script
 preview. Typing a host updates the callback URL in the script preview after the

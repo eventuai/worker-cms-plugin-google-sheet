@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
-import { callbackToken, pageHash } from '../src/integrity';
+import { callbackToken, pageHash, pageSignature } from '../src/integrity';
 import { filterAndSortPages } from '../src/search';
 import { flattenLect, pagesToSheetValues, sheetValuesToUpdates } from '../src/sheet-mapper';
 import type { CmsPage, PluginEnv } from '../src/types';
@@ -43,6 +43,10 @@ const guestPage: CmsPage = {
 
 function guestRowHash(spreadsheetId = 'sheet-123'): Promise<string> {
   return pageHash('shared-secret', spreadsheetId, guestPage);
+}
+
+async function guestRowSignature(spreadsheetId = 'sheet-123'): Promise<string> {
+  return pageSignature(await guestRowHash(spreadsheetId));
 }
 
 afterEach(() => {
@@ -160,19 +164,19 @@ describe('sheet mapper', () => {
     expect(update.input.page_type).toBe('guest');
   });
 
-  it('captures the _hash cell without treating it as lect content', () => {
+  it('captures the _signature cell without treating it as lect content', () => {
     const [update] = sheetValuesToUpdates([
-      ['id', 'name', '@status', '_hash'],
+      ['id', 'name', '@status', '_signature'],
       ['11', 'Ada Guest', 'confirmed', 'token-abc'],
     ], 'guest', 'en');
 
-    expect(update.hash).toBe('token-abc');
+    expect(update.signature).toBe('token-abc');
     expect(update.input.lect).toEqual({ status: 'confirmed' });
   });
 
   it('keeps each update anchored to its real sheet row across blank rows', () => {
     const updates = sheetValuesToUpdates([
-      ['id', 'name', '_hash'],
+      ['id', 'name', '_signature'],
       ['11', 'Row two', 'a'],
       ['', '', ''],
       ['13', 'Row four', 'c'],
@@ -593,9 +597,9 @@ describe('admin sync', () => {
       }
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/') && init?.method === 'PUT') {
         const payload = JSON.parse(String(init.body)) as { values: string[][] };
-        expect(payload.values[0]).toEqual(['id', 'name', '@status', '_hash']);
+        expect(payload.values[0]).toEqual(['id', 'name', '@status', '_signature']);
         expect(payload.values[1].slice(0, 3)).toEqual(['11', 'Ada Guest', 'confirmed']);
-        expect(payload.values[1][3]).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+        expect(payload.values[1][3]).toMatch(/^[A-Za-z0-9_-]{10}$/);
         return Response.json({ updatedRows: 2 });
       }
       return Response.json({});
@@ -685,8 +689,8 @@ describe('admin sync', () => {
     expect(requestedLimit).toBe('2');
   });
 
-  it('imports rows whose _hash matches the current CMS page, then renews the hash cell', async () => {
-    const rowHash = await guestRowHash();
+  it('imports rows whose _signature matches the current CMS page, then renews the signature cell', async () => {
+    const rowHash = await guestRowSignature();
     const cmsUpdates: Array<{ id: string; body: Record<string, unknown> }> = [];
     const batchUpdates: Array<Record<string, unknown>> = [];
     const savedPage = { ...guestPage, name: 'Ada Guest', lect: { status: 'confirmed', name: { en: 'Ada' } } };
@@ -700,7 +704,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'page_type', 'name', 'slug', 'weight', '*mail_list', '@status', '.name|en', '_hash'],
+            ['id', 'page_type', 'name', 'slug', 'weight', '*mail_list', '@status', '.name|en', '_signature'],
             ['11', 'guest', 'Ada Guest', 'ada-guest', '9', '44', 'confirmed', 'Ada', rowHash],
           ],
         });
@@ -735,7 +739,7 @@ describe('admin sync', () => {
       lect: { _pointers: { mail_list: '44' }, status: 'confirmed', name: { en: 'Ada' } },
     });
 
-    const renewedHash = await pageHash('shared-secret', 'sheet-123', savedPage);
+    const renewedHash = pageSignature(await pageHash('shared-secret', 'sheet-123', savedPage));
     expect(batchUpdates).toHaveLength(1);
     expect(batchUpdates[0]).toMatchObject({
       valueInputOption: 'RAW',
@@ -743,8 +747,8 @@ describe('admin sync', () => {
     });
   });
 
-  it('skips rows whose _hash no longer matches the CMS page', async () => {
-    const staleHash = await pageHash('shared-secret', 'sheet-123', { ...guestPage, lect: { status: 'older-state' } });
+  it('skips rows whose _signature no longer matches the CMS page', async () => {
+    const staleHash = pageSignature(await pageHash('shared-secret', 'sheet-123', { ...guestPage, lect: { status: 'older-state' } }));
     const cmsWrites: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -752,7 +756,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'name', '@status', '_hash'],
+            ['id', 'name', '@status', '_signature'],
             ['11', 'Ada Guest', 'confirmed', staleHash],
           ],
         });
@@ -781,7 +785,7 @@ describe('admin sync', () => {
     expect(html).toContain('conflict');
   });
 
-  it('skips rows without a _hash token', async () => {
+  it('skips rows without a _signature token', async () => {
     const cmsWrites: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -811,12 +815,12 @@ describe('admin sync', () => {
 
     expect(response.status).toBe(409);
     expect(cmsWrites).toHaveLength(0);
-    expect(html).toContain('missing _hash');
+    expect(html).toContain('missing _signature');
   });
 
   it('skips rows whose id points at a page of a different type', async () => {
     const contactPage = { ...guestPage, id: 42, page_type: 'contact' };
-    const rowHash = await pageHash('shared-secret', 'sheet-123', contactPage);
+    const rowHash = pageSignature(await pageHash('shared-secret', 'sheet-123', contactPage));
     const cmsWrites: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -824,7 +828,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'name', '_hash'],
+            ['id', 'name', '_signature'],
             ['42', 'Hijacked', rowHash],
           ],
         });
@@ -854,7 +858,7 @@ describe('admin sync', () => {
   });
 
   it('imports verified rows from an authenticated sheet callback', async () => {
-    const rowHash = await guestRowHash();
+    const rowHash = await guestRowSignature();
     const cmsUpdates: Array<{ id: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -862,7 +866,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
         return Response.json({
           valueRanges: [
-            { values: [['id', 'page_type', 'name', '.name|mis', '@status', '_hash']] },
+            { values: [['id', 'page_type', 'name', '.name|mis', '@status', '_signature']] },
             { values: [['11', 'guest', 'Ada Guest', 'Ada default', 'confirmed', rowHash]] },
           ],
         });
@@ -873,7 +877,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'page_type', 'name', '.name|mis', '@status', '_hash'],
+            ['id', 'page_type', 'name', '.name|mis', '@status', '_signature'],
             ['11', 'guest', 'Ada Guest', 'Ada default', 'confirmed', rowHash],
           ],
         });
@@ -914,7 +918,7 @@ describe('admin sync', () => {
   });
 
   it('ignores row payloads posted to the callback and re-reads the sheet instead', async () => {
-    const rowHash = await guestRowHash();
+    const rowHash = await guestRowSignature();
     const cmsUpdates: Array<{ id: string; body: Record<string, unknown> }> = [];
     let sheetReads = 0;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -924,7 +928,7 @@ describe('admin sync', () => {
         sheetReads += 1;
         return Response.json({
           valueRanges: [
-            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['id', 'name', '@status', '_signature']] },
             { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
           ],
         });
@@ -936,7 +940,7 @@ describe('admin sync', () => {
         sheetReads += 1;
         return Response.json({
           values: [
-            ['id', 'name', '@status', '_hash'],
+            ['id', 'name', '@status', '_signature'],
             ['11', 'Ada Guest', 'confirmed', rowHash],
           ],
         });
@@ -977,7 +981,7 @@ describe('admin sync', () => {
   });
 
   it('accepts callbacks authenticated with the per-spreadsheet token', async () => {
-    const rowHash = await guestRowHash();
+    const rowHash = await guestRowSignature();
     const cmsUpdates: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -985,7 +989,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
         return Response.json({
           valueRanges: [
-            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['id', 'name', '@status', '_signature']] },
             { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
           ],
         });
@@ -996,7 +1000,7 @@ describe('admin sync', () => {
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'name', '@status', '_hash'],
+            ['id', 'name', '@status', '_signature'],
             ['11', 'Ada Guest', 'confirmed', rowHash],
           ],
         });
@@ -1026,7 +1030,7 @@ describe('admin sync', () => {
   });
 
   it('re-reads only the rows a callback reports as changed, via batchGet', async () => {
-    const rowHash = await guestRowHash();
+    const rowHash = await guestRowSignature();
     let batchGetRanges: string[] = [];
     let fullSheetReads = 0;
     let renewedRange = '';
@@ -1038,7 +1042,7 @@ describe('admin sync', () => {
         batchGetRanges = parsed.searchParams.getAll('ranges');
         return Response.json({
           valueRanges: [
-            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['id', 'name', '@status', '_signature']] },
             { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
           ],
         });
@@ -1077,7 +1081,7 @@ describe('admin sync', () => {
     // Header row plus the one changed data row (deduped, header-row 1 dropped).
     expect(batchGetRanges).toEqual(["'guest'!1:1", "'guest'!5:5"]);
     expect(cmsUpdates).toEqual(['11']);
-    // _hash is column 4 (D); the renewal must target the actual changed row 5.
+    // _signature is column 4 (D); the renewal must target the actual changed row 5.
     expect(renewedRange).toBe("'guest'!D5");
   });
 
@@ -1152,14 +1156,14 @@ describe('admin sync', () => {
   });
 
   it('surfaces CMS write-scope failures instead of reporting a clean import', async () => {
-    const rowHash = await guestRowHash();
+    const rowHash = await guestRowSignature();
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(url);
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.includes('/values/')) {
         return Response.json({
           values: [
-            ['id', 'page_type', 'name', '@status', '_hash'],
+            ['id', 'page_type', 'name', '@status', '_signature'],
             ['11', 'guest', 'Ada Guest', 'confirmed', rowHash],
           ],
         });

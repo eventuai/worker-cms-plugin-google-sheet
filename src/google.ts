@@ -48,7 +48,7 @@ export class GoogleSheetsClient {
   }
 
   // Writes individual cells (1-based row/column) in one batch request — used
-  // to renew _hash tokens after a verified import without rewriting the sheet.
+  // to renew _signature values after a verified import without rewriting the sheet.
   async updateCells(spreadsheetId: string, sheetTitle: string, cells: Array<{ row: number; column: number; value: string }>): Promise<void> {
     if (!cells.length) return;
     await this.googleFetch(
