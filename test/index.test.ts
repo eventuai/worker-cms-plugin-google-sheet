@@ -292,6 +292,25 @@ describe('admin sync', () => {
     expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
   });
 
+  it('prefills plugin host from the public request host but not localhost', async () => {
+    const publicResponse = await plugin.fetch(request('/__plugin/admin/sync', {
+      headers: {
+        'x-forwarded-host': 'cms.eventuai.com',
+        'x-forwarded-proto': 'https',
+      },
+    }), env());
+    const publicData = await publicResponse.json() as { pluginHost: string };
+    expect(publicData.pluginHost).toBe('https://cms.eventuai.com');
+
+    const localHeaders = new Headers({
+      'x-plugin-secret': 'shared-secret',
+      'x-cms-user': JSON.stringify({ id: 'u1', role: 'admin' }),
+    });
+    const localResponse = await plugin.fetch(new Request('http://127.0.0.1:8788/__plugin/admin/sync', { headers: localHeaders }), env());
+    const localData = await localResponse.json() as { pluginHost: string };
+    expect(localData.pluginHost).toBe('');
+  });
+
   it('never embeds callback code or the raw webhook secret on the sync page', async () => {
     const noSheet = await plugin.fetch(request('/__plugin/admin/sync'), env());
     const noSheetData = await noSheet.json() as Record<string, unknown>;
@@ -328,6 +347,8 @@ describe('admin sync', () => {
     expect(await template.text()).toContain('"sync"');
     const sectionHtml = await section.text();
     expect(sectionHtml).toContain('data-sheet-plugin-host');
+    expect(sectionHtml).toContain('data-sheet-spreadsheet-id');
+    expect(sectionHtml).toContain('data-sheet-page-types');
     expect(sectionHtml).toContain('name="plugin_host"');
     expect(sectionHtml).toContain('Preview');
     expect(sectionHtml).not.toContain('data-sheet-apps-script');
@@ -338,6 +359,8 @@ describe('admin sync', () => {
     expect(asset.headers.get('content-type')).toContain('text/javascript');
     const assetScript = await asset.text();
     expect(assetScript).toContain('cms-plugin-google-sheet.pluginHost');
+    expect(assetScript).toContain('cms-plugin-google-sheet.spreadsheetId');
+    expect(assetScript).toContain('cms-plugin-google-sheet.pageTypes');
     expect(assetScript).toContain('localStorage.setItem');
     expect(assetScript).not.toContain('data-sheet-apps-script');
     expect(assetScript).not.toContain('SpreadsheetApp.getActive().getId()');

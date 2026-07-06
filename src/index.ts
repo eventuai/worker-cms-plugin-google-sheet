@@ -122,7 +122,7 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
     }
   }
 
-  return clientView('Google Sheets', '/templates/sync.json', await syncViewData(env, url.searchParams));
+  return clientView('Google Sheets', '/templates/sync.json', await syncViewData(env, url.searchParams, request, url));
 }
 
 async function previewExport(cms: CmsClient, sync: SyncRequest): Promise<SyncPreviewResult> {
@@ -333,13 +333,13 @@ function selectedColumnsFromForm(form: FormData, pageTypes: string[]): Record<st
   return selected;
 }
 
-async function syncViewData(env: PluginEnv, params: URLSearchParams): Promise<Record<string, unknown>> {
+async function syncViewData(env: PluginEnv, params: URLSearchParams, request: Request, url: URL): Promise<Record<string, unknown>> {
   const pageTypes = params.get('page_types') || configuredPageTypes(env).join(', ');
   const spreadsheetId = params.get('spreadsheet_id') || '';
   const operator = params.get('operator') || 'AND';
   const sort = params.get('sort') || 'updated_at';
   const order = params.get('order') || 'DESC';
-  const pluginHost = params.get('plugin_host') || '';
+  const pluginHost = params.get('plugin_host') || defaultPluginHostFromRequest(request, url);
   const limit = Number(params.get('limit') ?? 500);
   const ready = !!(env.CMS_URL && env.PLUGIN_SECRET && (env.GOOGLE_ACCESS_TOKEN || (env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY)));
   const criteriaIndexes = criteriaIndexesFromParams(params);
@@ -369,6 +369,45 @@ async function syncViewData(env: PluginEnv, params: URLSearchParams): Promise<Re
     nextCriterionIndex: Math.max(2, maxCriterionIndex + 1),
     adminScriptSrc: `/admin/plugins/${PLUGIN_ID}${ADMIN_SCRIPT_ASSET}`,
   };
+}
+
+function defaultPluginHostFromRequest(request: Request, url: URL): string {
+  const host = firstHeaderValue(request.headers.get('x-forwarded-host'))
+    || firstHeaderValue(request.headers.get('host'))
+    || url.host;
+  if (!host || isLocalHost(host)) return '';
+
+  const proto = firstHeaderValue(request.headers.get('x-forwarded-proto')) || url.protocol.replace(/:$/, '') || 'https';
+  const protocol = proto.toLowerCase() === 'http' ? 'http' : 'https';
+  return `${protocol}://${host}`;
+}
+
+function firstHeaderValue(value: string | null): string {
+  return (value || '').split(',')[0]?.trim() || '';
+}
+
+function isLocalHost(host: string): boolean {
+  const hostname = hostnameFromHost(host).toLowerCase();
+  return hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === '::1'
+    || hostname === '0.0.0.0'
+    || /^127\./.test(hostname);
+}
+
+function hostnameFromHost(host: string): string {
+  const trimmed = host.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('[')) {
+    const end = trimmed.indexOf(']');
+    return end > 0 ? trimmed.slice(1, end) : trimmed;
+  }
+  if (trimmed === '::1') return trimmed;
+  try {
+    return new URL(`http://${trimmed}`).hostname;
+  } catch {
+    return trimmed.split(':')[0] || trimmed;
+  }
 }
 
 function criteriaIndexesFromParams(params: URLSearchParams): number[] {
@@ -458,7 +497,7 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
     <form id="sheet-sync-form" method="post" class="mt-4 max-w-5xl space-y-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
       <label class="block">
         <span class="block text-sm font-medium text-gray-700 mb-1">Spreadsheet ID or URL</span>
-        <input name="spreadsheet_id" value="{{ spreadsheetId | escape }}" required placeholder="Paste the share link from Step 1-3 above"
+        <input name="spreadsheet_id" value="{{ spreadsheetId | escape }}" required placeholder="Paste the share link from Step 1-3 above" data-sheet-spreadsheet-id
           class="block min-w-0 w-full max-w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
       </label>
 
@@ -897,38 +936,46 @@ function jsString(value: string): string {
 }
 
 const ADMIN_SCRIPT = String.raw`(function () {
-  var HOST_STORAGE_KEY = 'cms-plugin-google-sheet.pluginHost';
+  var FIELDS = [
+    { selector: '[data-sheet-plugin-host]', key: 'cms-plugin-google-sheet.pluginHost' },
+    { selector: '[data-sheet-spreadsheet-id]', key: 'cms-plugin-google-sheet.spreadsheetId' },
+    { selector: '[data-sheet-page-types]', key: 'cms-plugin-google-sheet.pageTypes' }
+  ];
 
-  function loadHost() {
+  function loadValue(key) {
     try {
-      return window.localStorage ? window.localStorage.getItem(HOST_STORAGE_KEY) || '' : '';
+      return window.localStorage ? window.localStorage.getItem(key) || '' : '';
     } catch (error) {
       return '';
     }
   }
 
-  function saveHost(value) {
+  function saveValue(key, value) {
     try {
-      if (window.localStorage) window.localStorage.setItem(HOST_STORAGE_KEY, String(value || '').trim());
+      if (window.localStorage) window.localStorage.setItem(key, String(value || '').trim());
     } catch (error) {
       // localStorage can be unavailable in private or embedded browsing modes.
     }
   }
 
-  function bind(root) {
-    var host = root.querySelector('[data-sheet-plugin-host]');
-    if (!host) return;
+  function bindField(root, field) {
+    var input = root.querySelector(field.selector);
+    if (!input) return;
 
-    var storedHost = loadHost();
-    if (!host.value && storedHost) {
-      host.value = storedHost;
-    } else if (host.value) {
-      saveHost(host.value);
+    var storedValue = loadValue(field.key);
+    if (!input.value && storedValue) {
+      input.value = storedValue;
+    } else if (input.value) {
+      saveValue(field.key, input.value);
     }
 
-    host.addEventListener('input', function () {
-      saveHost(host.value);
+    input.addEventListener('input', function () {
+      saveValue(field.key, input.value);
     });
+  }
+
+  function bind(root) {
+    FIELDS.forEach(function (field) { bindField(root, field); });
   }
 
   if (document.readyState === 'loading') {
