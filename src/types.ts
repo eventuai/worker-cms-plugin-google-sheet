@@ -99,9 +99,7 @@ export interface ImportResult {
 // sheet, so the payload can only point at rows, never inject their values.
 export interface SheetCallbackPayload {
   spreadsheetId?: unknown;
-  pageTypes?: unknown;
   pageType?: unknown;
   sheetName?: unknown;
-  language?: unknown;
   rowNumbers?: unknown;
 }

@@ -83,9 +83,8 @@ re-reads one row, not the whole sheet) and applies the same verified import
 logic used by **Import from Sheet**. Row *content* is never taken from the
 payload — `rowNumbers` only points at rows, so a caller holding the token can
 at most trigger a re-import of rows that are already in the sheet, all
-`_hash`-verified. A callback without `rowNumbers` (e.g. an older trigger)
-falls back to re-reading the whole tab. At most `200` rows are processed per
-callback.
+`_hash`-verified. A callback must include `rowNumbers`; at most `200` rows are
+processed per callback.
 
 ### Callback tokens (how the secret is shared with Apps Script)
 
@@ -105,10 +104,6 @@ A leaked token only authorizes callbacks for that one spreadsheet (which the
 holder could already edit), and even then only triggers a re-import of the
 sheet's own `_hash`-verified content. Rotating `SHEET_WEBHOOK_SECRET`
 invalidates every issued token.
-
-The callback also still accepts the raw `SHEET_WEBHOOK_SECRET` in the same
-header, so triggers installed before tokens existed keep working; migrate them
-to tokens when convenient.
 
 ## Row integrity (`_hash`)
 

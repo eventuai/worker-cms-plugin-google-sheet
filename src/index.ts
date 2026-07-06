@@ -1,6 +1,6 @@
 import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
-import { HASH_COLUMN, callbackToken, pageHash, secureEquals } from './integrity';
+import { SIGNATURE_COLUMN, callbackToken, hashIncludesSignature, pageHash, pageSignature, secureEquals } from './integrity';
 import { filterAndSortPages, parseCriteria, parseOperator, parseOrder, parseSort } from './search';
 import { pagesToSheetValues, sheetColumnsForPages, sheetRowsToUpdates, sheetValuesToUpdates } from './sheet-mapper';
 import type { RowUpdate } from './sheet-mapper';
@@ -180,11 +180,11 @@ async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: S
   return { spreadsheetId, spreadsheetUrl: sheets.spreadsheetUrl(spreadsheetId), pageTypes: results };
 }
 
-// Every row must carry a _hash token minted at export time. Before a row is
-// applied, the current CMS page is fetched and its token recomputed: a
-// mismatch means the page changed since the export (or the token was forged
+// Every row must carry a _signature minted at export time. Before a row is
+// applied, the current CMS page is fetched and its full hash is recomputed: a
+// mismatch means the page changed since the export (or the signature was forged
 // or copied from another spreadsheet), so the row is skipped as a conflict.
-// After a successful update the cell is refreshed with the new token so the
+// After a successful update the cell is refreshed with the new signature so the
 // sheet stays importable. The edit-trigger callback re-reads only the rows it
 // reported as changed; the admin action re-reads the whole sheet. In both
 // cases row content comes from the sheet, never from the caller.
@@ -206,7 +206,7 @@ async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync:
       headerRow = values[0] ?? [];
       updates = sheetValuesToUpdates(values, pageType, sync.language);
     }
-    const hashColumn = headerRow.findIndex((header) => header.trim() === HASH_COLUMN);
+    const signatureColumn = headerRow.findIndex((header) => header.trim() === SIGNATURE_COLUMN);
     let updated = 0;
     let skipped = 0;
     const errors: string[] = [];
@@ -219,9 +219,9 @@ async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync:
         errors.push(`Row ${rowNumber}: ${update.error ?? 'invalid row'}`);
         continue;
       }
-      if (!update.hash) {
+      if (!update.signature) {
         skipped += 1;
-        errors.push(`Row ${rowNumber}: missing _hash - re-export this sheet to enable verified imports`);
+        errors.push(`Row ${rowNumber}: missing _signature - re-export this sheet to enable verified imports`);
         continue;
       }
       try {
@@ -232,15 +232,15 @@ async function importFromSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync:
           continue;
         }
         const expected = await pageHash(key, sync.spreadsheetId, current);
-        if (!(await secureEquals(update.hash, expected))) {
+        if (!hashIncludesSignature(expected, update.signature)) {
           skipped += 1;
           errors.push(`Row ${rowNumber}: conflict - page ${update.id} changed in the CMS after this sheet was exported; re-export before editing this row`);
           continue;
         }
         const saved = await cms.update(update.id, { ...update.input, version_action: 'update from google sheet' });
         updated += 1;
-        if (hashColumn !== -1) {
-          renewals.push({ row: rowNumber, column: hashColumn + 1, value: await pageHash(key, sync.spreadsheetId, saved) });
+        if (signatureColumn !== -1) {
+          renewals.push({ row: rowNumber, column: signatureColumn + 1, value: pageSignature(await pageHash(key, sync.spreadsheetId, saved)) });
         }
       } catch (error) {
         skipped += 1;
@@ -292,34 +292,33 @@ function syncRequestFromForm(form: FormData, env: PluginEnv): SyncRequest {
 // in the spreadsheet.
 function syncRequestFromCallback(payload: SheetCallbackPayload | null, env: PluginEnv): SyncRequest {
   if (!payload || typeof payload !== 'object') throw new GoogleSheetsError('Invalid callback payload.', 400);
-  const pageTypes = callbackPageTypes(payload) || configuredPageTypes(env);
-  if (!pageTypes.length) throw new GoogleSheetsError('Callback payload must include pageType, pageTypes, or sheetName.', 400);
+  const pageTypes = callbackPageTypes(payload);
+  if (!pageTypes || !pageTypes.length) throw new GoogleSheetsError('Callback payload must include pageType or sheetName.', 400);
   const spreadsheetId = spreadsheetIdFromInput(String(payload.spreadsheetId ?? ''));
   if (!spreadsheetId) throw new GoogleSheetsError('Callback payload must include spreadsheetId.', 400);
+  const rowNumbers = callbackRowNumbers(payload);
+  if (!rowNumbers.length) throw new GoogleSheetsError('Callback payload must include rowNumbers.', 400);
   return {
     spreadsheetId,
     pageTypes,
-    language: String(payload.language ?? env.DEFAULT_LANGUAGE ?? 'en').trim() || 'en',
+    language: String(env.DEFAULT_LANGUAGE ?? 'en').trim() || 'en',
     pluginHost: '',
     limit: 500,
     criteria: [],
     operator: 'AND',
     sort: 'updated_at',
     order: 'DESC',
-    rowNumbers: callbackRowNumbers(payload),
+    rowNumbers,
   };
 }
 
-// The rows the trigger says changed. Absent or unparseable -> undefined, which
-// makes the import fall back to reading the whole sheet (so triggers installed
-// before row targeting existed keep working).
-function callbackRowNumbers(payload: SheetCallbackPayload): number[] | undefined {
-  if (!Array.isArray(payload.rowNumbers)) return undefined;
+function callbackRowNumbers(payload: SheetCallbackPayload): number[] {
+  if (!Array.isArray(payload.rowNumbers)) return [];
   const numbers = payload.rowNumbers
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value >= 2);
   const unique = [...new Set(numbers)].sort((left, right) => left - right);
-  return unique.length ? unique.slice(0, MAX_CALLBACK_ROWS) : undefined;
+  return unique.slice(0, MAX_CALLBACK_ROWS);
 }
 
 function selectedColumnsFromForm(form: FormData, pageTypes: string[]): Record<string, string[]> | undefined {
@@ -743,7 +742,7 @@ function importSummary(result: ImportResult): string {
   return `<div class="space-y-4">
     ${result.ok
       ? notice('Spreadsheet imported', `<a class="font-semibold text-indigo-700 hover:text-indigo-900" href="${esc(result.spreadsheetUrl)}">${esc(result.spreadsheetId)}</a>`, 'green')
-      : notice('Some rows were not imported', `Check the Notes column below. If you see <code>forbidden_page_type</code>, approve write access for this plugin in CMS plugin page-type access. Rows marked <code>conflict</code> or <code>missing _hash</code> mean the sheet is out of date - re-export to refresh it.`, 'amber')}
+      : notice('Some rows were not imported', `Check the Notes column below. If you see <code>forbidden_page_type</code>, approve write access for this plugin in CMS plugin page-type access. Rows marked <code>conflict</code> or <code>missing _signature</code> mean the sheet is out of date - re-export to refresh it.`, 'amber')}
     ${summaryTable(['Page type', 'Rows', 'Updated', 'Skipped', 'Notes'], rows)}
   </div>`;
 }
@@ -817,15 +816,13 @@ function requirePluginSecret(request: Request, secret: string | undefined): Resp
 }
 
 // Header-only on purpose: a `?secret=` query parameter would end up in access
-// logs and Apps Script execution logs. The header may carry either the
-// per-spreadsheet callback token (what generated Apps Scripts use) or the raw
-// SHEET_WEBHOOK_SECRET (kept for triggers installed before tokens existed).
+// logs and Apps Script execution logs. The header carries the per-spreadsheet
+// callback token generated from SHEET_WEBHOOK_SECRET.
 async function requireCallbackAuth(request: Request, webhookSecret: string, spreadsheetId: string): Promise<Response | null> {
   const presented = request.headers.get('x-sheet-webhook-secret') ?? '';
   if (presented) {
     const token = await callbackToken(webhookSecret, spreadsheetId);
     if (await secureEquals(presented, token)) return null;
-    if (await secureEquals(presented, webhookSecret)) return null;
   }
   return Response.json({ error: 'forbidden' }, { status: 403 });
 }
@@ -857,11 +854,6 @@ function configuredPageTypes(env: PluginEnv): string[] {
 function callbackPageTypes(payload: SheetCallbackPayload): string[] | null {
   if (typeof payload.pageType === 'string' && payload.pageType.trim()) return [payload.pageType.trim()];
   if (typeof payload.sheetName === 'string' && payload.sheetName.trim()) return [payload.sheetName.trim()];
-  if (Array.isArray(payload.pageTypes)) {
-    const types = payload.pageTypes.map((value) => String(value).trim()).filter(Boolean);
-    return types.length ? [...new Set(types)] : null;
-  }
-  if (typeof payload.pageTypes === 'string') return parsePageTypes(payload.pageTypes);
   return null;
 }
 

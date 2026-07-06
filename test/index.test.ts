@@ -859,6 +859,14 @@ describe('admin sync', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(url);
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
+        return Response.json({
+          valueRanges: [
+            { values: [['id', 'page_type', 'name', '.name|mis', '@status', '_hash']] },
+            { values: [['11', 'guest', 'Ada Guest', 'Ada default', 'confirmed', rowHash]] },
+          ],
+        });
+      }
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchUpdate')) {
         return Response.json({});
       }
@@ -883,8 +891,11 @@ describe('admin sync', () => {
 
     const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-sheet-webhook-secret': 'sheet-secret' },
-      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', language: 'mis' }),
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
+      },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
     }), env());
     const result = await response.json() as { ok: boolean };
 
@@ -909,6 +920,15 @@ describe('admin sync', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(url);
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
+        sheetReads += 1;
+        return Response.json({
+          valueRanges: [
+            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
+          ],
+        });
+      }
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchUpdate')) {
         return Response.json({});
       }
@@ -934,10 +954,14 @@ describe('admin sync', () => {
 
     const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-sheet-webhook-secret': 'sheet-secret' },
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
+      },
       body: JSON.stringify({
         spreadsheetId: 'sheet-123',
         sheetName: 'guest',
+        rowNumbers: [2],
         headers: ['id', 'name'],
         rows: [['999', 'Injected via payload']],
       }),
@@ -958,6 +982,14 @@ describe('admin sync', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const parsed = new URL(url);
+      if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchGet')) {
+        return Response.json({
+          valueRanges: [
+            { values: [['id', 'name', '@status', '_hash']] },
+            { values: [['11', 'Ada Guest', 'confirmed', rowHash]] },
+          ],
+        });
+      }
       if (parsed.hostname === 'sheets.googleapis.com' && parsed.pathname.endsWith('/values:batchUpdate')) {
         return Response.json({});
       }
@@ -986,7 +1018,7 @@ describe('admin sync', () => {
         'content-type': 'application/json',
         'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
       },
-      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
     }), env());
 
     expect(response.status).toBe(200);
@@ -1060,7 +1092,21 @@ describe('admin sync', () => {
         'content-type': 'application/json',
         'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'other-sheet'),
       },
-      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
+    }), env());
+
+    expect(response.status).toBe(403);
+  });
+
+  it('rejects callbacks authenticated with the raw webhook secret', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('No upstream request should be made for a rejected callback');
+    }));
+
+    const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-sheet-webhook-secret': 'sheet-secret' },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
     }), env());
 
     expect(response.status).toBe(403);
@@ -1070,17 +1116,36 @@ describe('admin sync', () => {
     const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
     }), env());
 
     expect(response.status).toBe(403);
+  });
+
+  it('rejects callbacks that omit row numbers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('No upstream request should be made for an invalid callback');
+    }));
+
+    const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-sheet-webhook-secret': await callbackToken('sheet-secret', 'sheet-123'),
+      },
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+    }), env());
+    const result = await response.json() as { error: string };
+
+    expect(response.status).toBe(400);
+    expect(result.error).toBe('Callback payload must include rowNumbers.');
   });
 
   it('no longer accepts the webhook secret as a query parameter', async () => {
     const response = await plugin.fetch(new Request('https://plugin.test/__plugin/sheets/callback?secret=sheet-secret', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest' }),
+      body: JSON.stringify({ spreadsheetId: 'sheet-123', pageType: 'guest', rowNumbers: [2] }),
     }), env());
 
     expect(response.status).toBe(403);
