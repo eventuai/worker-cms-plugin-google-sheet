@@ -106,14 +106,13 @@ async function handleAdmin(request: Request, env: PluginEnv, url: URL): Promise<
     const cms = new CmsClient(env, user.id ?? null);
     const sheets = new GoogleSheetsClient(env);
 
-    if (action === 'preview' || action.startsWith('select_all:') || action.startsWith('clear_all:')) {
+    if (action === 'preview') {
       const result = await previewExport(cms, sync);
-      const previewSync = applyColumnToggle(sync, result, action);
-      return chrome('Google Sheets preview', resultView('Preview export columns', previewView(previewSync, result)));
+      return clientView('Google Sheets preview', '/templates/preview.json', previewViewData('Preview export columns', sync, result));
     }
     if (action === 'export') {
       const result = await exportToSheet(cms, sheets, sync, env);
-      return chrome('Google Sheets export', resultView('Export complete', await exportSummary(result, sync, env)));
+      return clientView('Google Sheets export', '/templates/result.json', await exportResultViewData('Export complete', result, sync, env));
     }
     if (action === 'import') {
       const result = await importFromSheet(cms, sheets, sync, env);
@@ -137,27 +136,6 @@ async function previewExport(cms: CmsClient, sync: SyncRequest): Promise<SyncPre
     });
   }
   return { pageTypes: results };
-}
-
-// Handles the "Select all" / "Clear all" buttons on the preview page: each is
-// a submit button named `action` with value `select_all:{pageType}` or
-// `clear_all:{pageType}`, re-rendering the same preview with that page type's
-// column selection forced to all-columns or id-only.
-function applyColumnToggle(sync: SyncRequest, result: SyncPreviewResult, action: string): SyncRequest {
-  const colonIndex = action.indexOf(':');
-  if (colonIndex === -1) return sync;
-  const mode = action.slice(0, colonIndex);
-  const targetType = action.slice(colonIndex + 1);
-  if (mode !== 'select_all' && mode !== 'clear_all') return sync;
-  const item = result.pageTypes.find((entry) => entry.pageType === targetType);
-  if (!item) return sync;
-  return {
-    ...sync,
-    selectedColumns: {
-      ...sync.selectedColumns,
-      [targetType]: mode === 'select_all' ? item.columns : ['id'],
-    },
-  };
 }
 
 async function exportToSheet(cms: CmsClient, sheets: GoogleSheetsClient, sync: SyncRequest, env: PluginEnv): Promise<SyncResult> {
@@ -431,8 +409,28 @@ function serveAdminView(url: URL): Response | null {
       headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
     });
   }
+  if (viewPath === '/templates/result.json') {
+    return new Response(RESULT_TEMPLATE_JSON, {
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+  if (viewPath === '/templates/preview.json') {
+    return new Response(PREVIEW_TEMPLATE_JSON, {
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
   if (viewPath === '/sections/sync.liquid') {
     return new Response(SYNC_SECTION_LIQUID, {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+  if (viewPath === '/sections/result.liquid') {
+    return new Response(RESULT_SECTION_LIQUID, {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+  if (viewPath === '/sections/preview.liquid') {
+    return new Response(PREVIEW_SECTION_LIQUID, {
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
     });
   }
@@ -440,6 +438,8 @@ function serveAdminView(url: URL): Response | null {
 }
 
 const SYNC_TEMPLATE_JSON = JSON.stringify({ sections: { main: { type: 'sync' } }, order: ['main'] });
+const RESULT_TEMPLATE_JSON = JSON.stringify({ sections: { main: { type: 'result' } }, order: ['main'] });
+const PREVIEW_TEMPLATE_JSON = JSON.stringify({ sections: { main: { type: 'preview' } }, order: ['main'] });
 
 const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
     <div class="flex items-center justify-between gap-4 mb-4">
@@ -659,6 +659,73 @@ const SYNC_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:
     </div>
   </div>`;
 
+const RESULT_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
+    <div class="flex items-center justify-between gap-4 mb-4">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">{{ heading | escape }}</h1>
+      </div>
+      <a href="{{ backHref | escape }}" class="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50">Back</a>
+    </div>
+
+    <div class="space-y-4">
+      <div class="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+        <span class="font-semibold">{{ notice.title | escape }}.</span>
+        <a class="font-semibold text-indigo-700 hover:text-indigo-900" href="{{ notice.href | escape }}">{{ notice.label | escape }}</a>
+      </div>
+
+      <label class="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <span class="mb-2 block text-sm font-semibold text-gray-900">{{ copyField.label | escape }}</span>
+        <input readonly value="{{ copyField.value | escape }}"
+          class="block min-w-0 w-full max-w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      </label>
+
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm" data-sheet-copy-block>
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <span class="block text-sm font-semibold text-gray-900">{{ copyCode.label | escape }}</span>
+          <button type="button" data-sheet-copy-code
+            class="inline-flex h-8 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50">
+            Copy
+          </button>
+        </div>
+        <textarea readonly rows="18" data-sheet-copy-source
+          class="block min-h-[22rem] w-full resize-y rounded-lg border border-gray-300 bg-gray-900 p-4 font-mono text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">{{ copyCode.value | escape }}</textarea>
+      </div>
+
+      <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+        <table class="w-full min-w-[560px] text-left">
+          <thead class="bg-gray-50">
+            <tr>
+              {% for header in table.headers %}
+                <th class="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{{ header | escape }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            {% for row in table.rows %}
+              <tr>
+                {% for cell in row %}
+                  <td class="px-4 py-3 text-sm text-gray-700">{{ cell | escape }}</td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <script src="{{ adminScriptSrc | escape }}" defer></script>
+    </div>
+  </div>`;
+
+const PREVIEW_SECTION_LIQUID = String.raw`<div class="px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
+    <div class="flex items-center justify-between gap-4 mb-4">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">{{ heading | escape }}</h1>
+      </div>
+      <a href="{{ backHref | escape }}" class="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-700 hover:bg-gray-50">Back</a>
+    </div>
+    {{ previewHtml }}
+    <script src="{{ adminScriptSrc | escape }}" defer></script>
+  </div>`;
+
 function resultView(title: string, body: string): string {
   return `<div class="px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
     <div class="flex items-center justify-between gap-4 mb-4">
@@ -671,20 +738,35 @@ function resultView(title: string, body: string): string {
   </div>`;
 }
 
-async function exportSummary(result: SyncResult, sync: SyncRequest, env: PluginEnv): Promise<string> {
+async function exportResultViewData(title: string, result: SyncResult, sync: SyncRequest, env: PluginEnv): Promise<Record<string, unknown>> {
   const appScriptCode = appsScriptTemplate({
     pluginHost: sync.pluginHost || 'https://YOUR_PLUGIN_HOST',
     callbackToken: env.SHEET_WEBHOOK_SECRET
       ? await callbackToken(env.SHEET_WEBHOOK_SECRET, result.spreadsheetId)
       : 'YOUR_SHEET_CALLBACK_TOKEN',
   });
-  return `<div class="space-y-4">
-    ${notice('Spreadsheet ready', `<a class="font-semibold text-indigo-700 hover:text-indigo-900" href="${esc(result.spreadsheetUrl)}">${esc(result.spreadsheetId)}</a>`, 'green')}
-    ${copyField('Published sheet URL', result.spreadsheetUrl)}
-    ${copyCodeBlock('Apps Script callback', appScriptCode)}
-    ${summaryTable(['Page type', 'Fetched', 'Exported', 'Columns'], result.pageTypes.map((item) => [item.pageType, String(item.total), String(item.exported), String(item.columns)]))}
-    <script src="/admin/plugins/${PLUGIN_ID}${ADMIN_SCRIPT_ASSET}" defer></script>
-  </div>`;
+  return {
+    heading: title,
+    backHref: `/admin/plugins/${PLUGIN_ID}/sync`,
+    notice: {
+      title: 'Spreadsheet ready',
+      href: result.spreadsheetUrl,
+      label: result.spreadsheetId,
+    },
+    copyField: {
+      label: 'Published sheet URL',
+      value: result.spreadsheetUrl,
+    },
+    copyCode: {
+      label: 'Apps Script callback',
+      value: appScriptCode,
+    },
+    table: {
+      headers: ['Page type', 'Fetched', 'Exported', 'Columns'],
+      rows: result.pageTypes.map((item) => [item.pageType, String(item.total), String(item.exported), String(item.columns)]),
+    },
+    adminScriptSrc: `/admin/plugins/${PLUGIN_ID}${ADMIN_SCRIPT_ASSET}`,
+  };
 }
 
 function previewView(sync: SyncRequest, result: SyncPreviewResult): string {
@@ -702,20 +784,29 @@ function previewView(sync: SyncRequest, result: SyncPreviewResult): string {
   </form>`;
 }
 
+function previewViewData(title: string, sync: SyncRequest, result: SyncPreviewResult): Record<string, unknown> {
+  return {
+    heading: title,
+    backHref: `/admin/plugins/${PLUGIN_ID}/sync`,
+    previewHtml: previewView(sync, result),
+    adminScriptSrc: `/admin/plugins/${PLUGIN_ID}${ADMIN_SCRIPT_ASSET}`,
+  };
+}
+
 function columnPicker(item: SyncPreviewResult['pageTypes'][number], selected: string[] | undefined): string {
   const selectedSet = selected ? new Set(selected) : null;
-  return `<div class="rounded-xl border border-gray-200 bg-white shadow-sm">
+  return `<div class="rounded-xl border border-gray-200 bg-white shadow-sm" data-sheet-column-picker>
     <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
       <div>
         <h2 class="text-lg font-bold text-gray-900">${esc(item.pageType)}</h2>
         <p class="mt-1 text-sm text-gray-500">${item.exported} of ${item.total} pages matched, ${item.columns.length} columns available.</p>
       </div>
-      <div class="flex shrink-0 gap-2">
-        <button type="submit" name="action" value="select_all:${esc(item.pageType)}"
+    <div class="flex shrink-0 gap-2">
+        <button type="button" data-sheet-column-select-all
           class="inline-flex h-8 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50">
           Select all
         </button>
-        <button type="submit" name="action" value="clear_all:${esc(item.pageType)}"
+        <button type="button" data-sheet-column-clear-all
           class="inline-flex h-8 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50">
           Clear all
         </button>
@@ -732,7 +823,7 @@ function columnCheckbox(pageType: string, column: string, checked: boolean): str
   const isChecked = required || checked;
   const name = `column:${pageType}`;
   return `<label class="flex min-w-0 items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
-    <input type="checkbox" name="${esc(name)}" value="${esc(column)}" ${isChecked ? 'checked' : ''} ${required ? 'disabled' : ''}
+    <input type="checkbox" name="${esc(name)}" value="${esc(column)}" data-sheet-column-checkbox ${isChecked ? 'checked' : ''} ${required ? 'disabled' : ''}
       class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
     ${required ? `<input type="hidden" name="${esc(name)}" value="${esc(column)}">` : ''}
     <span class="min-w-0 truncate">${esc(column)}</span>
@@ -778,28 +869,6 @@ function summaryTable(headers: string[], rows: string[][]): string {
       <thead class="bg-gray-50"><tr>${headers.map((header) => `<th class="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">${esc(header)}</th>`).join('')}</tr></thead>
       <tbody class="divide-y divide-gray-100">${rows.map((row) => `<tr>${row.map((cell) => `<td class="px-4 py-3 text-sm text-gray-700">${cell ? esc(cell) : '<span class="text-gray-400">-</span>'}</td>`).join('')}</tr>`).join('')}</tbody>
     </table>
-  </div>`;
-}
-
-function copyField(label: string, value: string): string {
-  return `<label class="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-    <span class="mb-2 block text-sm font-semibold text-gray-900">${esc(label)}</span>
-    <input readonly value="${esc(value)}"
-      class="block min-w-0 w-full max-w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 font-mono text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
-  </label>`;
-}
-
-function copyCodeBlock(label: string, value: string): string {
-  return `<div class="rounded-xl border border-gray-200 bg-white p-4 shadow-sm" data-sheet-copy-block>
-    <div class="mb-2 flex items-center justify-between gap-3">
-      <span class="block text-sm font-semibold text-gray-900">${esc(label)}</span>
-      <button type="button" data-sheet-copy-code
-        class="inline-flex h-8 items-center justify-center rounded-lg border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-gray-50">
-        Copy
-      </button>
-    </div>
-    <textarea readonly rows="18" data-sheet-copy-source
-      class="block min-h-[22rem] w-full resize-y rounded-lg border border-gray-300 bg-gray-900 p-4 font-mono text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500">${esc(value)}</textarea>
   </div>`;
 }
 
@@ -982,6 +1051,7 @@ const ADMIN_SCRIPT = String.raw`(function () {
 
   function bind(root) {
     FIELDS.forEach(function (field) { bindField(root, field); });
+    bindColumnToggles(root);
     bindCopyButtons(root);
   }
 
@@ -1014,6 +1084,28 @@ const ADMIN_SCRIPT = String.raw`(function () {
           window.setTimeout(function () { button.textContent = originalText || 'Copy'; }, 2200);
         });
       });
+    });
+  }
+
+  function bindColumnToggles(root) {
+    var pickers = root.querySelectorAll('[data-sheet-column-picker]');
+    pickers.forEach(function (picker) {
+      var selectButton = picker.querySelector('[data-sheet-column-select-all]');
+      var clearButton = picker.querySelector('[data-sheet-column-clear-all]');
+
+      function setChecked(checked) {
+        var inputs = picker.querySelectorAll('[data-sheet-column-checkbox]');
+        inputs.forEach(function (input) {
+          if (!input.disabled) input.checked = checked;
+        });
+      }
+
+      if (selectButton) {
+        selectButton.addEventListener('click', function () { setChecked(true); });
+      }
+      if (clearButton) {
+        clearButton.addEventListener('click', function () { setChecked(false); });
+      }
     });
   }
 

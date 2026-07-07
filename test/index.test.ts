@@ -205,6 +205,14 @@ describe('sheet mapper', () => {
       ['11', 'Ada Guest', 'confirmed'],
     ]);
   });
+
+  it('omits page_type from generated export columns because the sheet tab is the type', () => {
+    const values = pagesToSheetValues([guestPage], 'mis');
+
+    expect(values[0]).toContain('id');
+    expect(values[0]).toContain('name');
+    expect(values[0]).not.toContain('page_type');
+  });
 });
 
 describe('integrity tokens', () => {
@@ -340,11 +348,19 @@ describe('admin sync', () => {
 
   it('serves the sync client view files and admin asset', async () => {
     const template = await plugin.fetch(request('/__plugin/admin/views/templates/sync.json'), env());
+    const resultTemplate = await plugin.fetch(request('/__plugin/admin/views/templates/result.json'), env());
+    const previewTemplate = await plugin.fetch(request('/__plugin/admin/views/templates/preview.json'), env());
     const section = await plugin.fetch(request('/__plugin/admin/views/sections/sync.liquid'), env());
+    const resultSection = await plugin.fetch(request('/__plugin/admin/views/sections/result.liquid'), env());
+    const previewSection = await plugin.fetch(request('/__plugin/admin/views/sections/preview.liquid'), env());
     const asset = await plugin.fetch(new Request('https://plugin.test/assets/sheet-sync-admin.js'), env());
 
     expect(template.headers.get('content-type')).toContain('application/json');
     expect(await template.text()).toContain('"sync"');
+    expect(resultTemplate.headers.get('content-type')).toContain('application/json');
+    expect(await resultTemplate.text()).toContain('"result"');
+    expect(previewTemplate.headers.get('content-type')).toContain('application/json');
+    expect(await previewTemplate.text()).toContain('"preview"');
     const sectionHtml = await section.text();
     expect(sectionHtml).toContain('data-sheet-plugin-host');
     expect(sectionHtml).toContain('data-sheet-spreadsheet-id');
@@ -356,6 +372,14 @@ describe('admin sync', () => {
     expect(sectionHtml).not.toContain('data-sheet-language');
     expect(sectionHtml).not.toContain('>Language<');
     expect(sectionHtml).not.toContain('Export to Sheet');
+    const resultSectionHtml = await resultSection.text();
+    expect(resultSectionHtml).toContain('data-sheet-copy-block');
+    expect(resultSectionHtml).toContain('data-sheet-copy-code');
+    expect(resultSectionHtml).toContain('data-sheet-copy-source');
+    expect(resultSectionHtml).toContain('{{ adminScriptSrc | escape }}');
+    const previewSectionHtml = await previewSection.text();
+    expect(previewSectionHtml).toContain('{{ previewHtml }}');
+    expect(previewSectionHtml).toContain('{{ adminScriptSrc | escape }}');
     expect(asset.headers.get('content-type')).toContain('text/javascript');
     const assetScript = await asset.text();
     expect(assetScript).toContain('cms-plugin-google-sheet.pluginHost');
@@ -364,6 +388,9 @@ describe('admin sync', () => {
     expect(assetScript).toContain('localStorage.setItem');
     expect(assetScript).toContain('data-sheet-copy-code');
     expect(assetScript).toContain('navigator.clipboard.writeText');
+    expect(assetScript).toContain('data-sheet-column-select-all');
+    expect(assetScript).toContain('data-sheet-column-clear-all');
+    expect(assetScript).toContain('data-sheet-column-checkbox');
     expect(assetScript).not.toContain('data-sheet-apps-script');
     expect(assetScript).not.toContain('SpreadsheetApp.getActive().getId()');
     expect(assetScript).not.toContain('rowNumbers: rowNumbers');
@@ -406,68 +433,24 @@ describe('admin sync', () => {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body,
     }), env());
-    const html = await response.text();
+    const data = await response.json() as { heading: string; previewHtml: string; adminScriptSrc: string };
 
     expect(response.status).toBe(200);
-    expect(html).toContain('Preview export columns');
-    expect(html).toContain('name="column:guest"');
-    expect(html).toContain('value="@status"');
-    expect(html).toContain('value="@status" checked');
-    expect(html).toContain('Export selected columns');
-    expect(html).toContain('value="select_all:guest"');
-    expect(html).toContain('value="clear_all:guest"');
+    expect(response.headers.get('x-cms-client-view')).toBe('1');
+    expect(response.headers.get('x-cms-view-path')).toBe('/templates/preview.json');
+    expect(data.heading).toBe('Preview export columns');
+    expect(data.previewHtml).toContain('name="column:guest"');
+    expect(data.previewHtml).not.toContain('value="page_type"');
+    expect(data.previewHtml).toContain('value="@status"');
+    expect(data.previewHtml).toMatch(/value="@status"[^>]*checked/);
+    expect(data.previewHtml).toContain('Export selected columns');
+    expect(data.previewHtml).toContain('type="button" data-sheet-column-select-all');
+    expect(data.previewHtml).toContain('type="button" data-sheet-column-clear-all');
+    expect(data.previewHtml).toContain('data-sheet-column-checkbox');
+    expect(data.previewHtml).not.toContain('value="select_all:guest"');
+    expect(data.previewHtml).not.toContain('value="clear_all:guest"');
+    expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
     expect(calls.every((url) => new URL(url).hostname === 'cms.test')).toBe(true);
-  });
-
-  it('clears and re-selects all columns for a page type from the preview buttons', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      const parsed = new URL(url);
-      if (parsed.hostname === 'cms.test' && parsed.pathname === '/__cms/pages') {
-        return Response.json({
-          total: 1,
-          pages: [{
-            id: 11,
-            page_type: 'guest',
-            name: 'Ada Guest',
-            slug: 'guest-ada',
-            weight: 5,
-            start: null,
-            end: null,
-            timezone: '+0800',
-            page_id: null,
-            updated_at: '2026-07-06',
-            lect: { status: 'confirmed', name: { en: 'Ada' } },
-          }],
-        });
-      }
-      throw new Error(`Unexpected fetch ${url}`);
-    }));
-
-    const clearBody = new URLSearchParams({ action: 'clear_all:guest', page_types: 'guest', language: 'en', columns_configured: '1' });
-    clearBody.append('column:guest', 'id');
-    const clearResponse = await plugin.fetch(request('/__plugin/admin/sync', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: clearBody,
-    }), env());
-    const clearHtml = await clearResponse.text();
-
-    expect(clearResponse.status).toBe(200);
-    expect(clearHtml).not.toContain('value="@status" checked');
-    expect(clearHtml).toContain('value="id" checked');
-
-    const selectBody = new URLSearchParams({ action: 'select_all:guest', page_types: 'guest', language: 'en', columns_configured: '1' });
-    selectBody.append('column:guest', 'id');
-    const selectResponse = await plugin.fetch(request('/__plugin/admin/sync', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: selectBody,
-    }), env());
-    const selectHtml = await selectResponse.text();
-
-    expect(selectResponse.status).toBe(200);
-    expect(selectHtml).toContain('value="@status" checked');
   });
 
   it('exports configured page types to Google Sheets', async () => {
@@ -523,23 +506,39 @@ describe('admin sync', () => {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body,
     }), env());
-    const html = await response.text();
+    const data = await response.json() as {
+      heading: string;
+      notice: { href: string; label: string };
+      copyField: { label: string; value: string };
+      copyCode: { label: string; value: string };
+      table: { headers: string[]; rows: string[][] };
+      adminScriptSrc: string;
+    };
 
     expect(response.status).toBe(200);
-    expect(html).toContain('sheet-123');
-    expect(html).toContain('Published sheet URL');
-    expect(html).toContain('https://docs.google.com/spreadsheets/d/sheet-123/edit');
-    expect(html).toContain('Apps Script callback');
-    expect(html).toContain('data-sheet-copy-block');
-    expect(html).toContain('data-sheet-copy-code');
-    expect(html).toContain('Copy');
-    expect(html).toContain('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
-    expect(html).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
-    expect(html).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${await callbackToken('sheet-secret', 'sheet-123')}';`);
-    expect(html).not.toContain("'sheet-secret'");
+    expect(response.headers.get('x-cms-client-view')).toBe('1');
+    expect(response.headers.get('x-cms-view-path')).toBe('/templates/result.json');
+    expect(data.heading).toBe('Export complete');
+    expect(data.notice.label).toBe('sheet-123');
+    expect(data.notice.href).toBe('https://docs.google.com/spreadsheets/d/sheet-123/edit');
+    expect(data.copyField).toEqual({
+      label: 'Published sheet URL',
+      value: 'https://docs.google.com/spreadsheets/d/sheet-123/edit',
+    });
+    expect(data.copyCode.label).toBe('Apps Script callback');
+    expect(data.copyCode.value).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
+    expect(data.copyCode.value).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${await callbackToken('sheet-secret', 'sheet-123')}';`);
+    expect(data.copyCode.value).not.toContain("'sheet-secret'");
+    expect(data.table.headers).toEqual(['Page type', 'Fetched', 'Exported', 'Columns']);
+    expect(data.table.rows).toEqual([
+      ['guest', '1', '1', '14'],
+      ['contact', '1', '1', '11'],
+    ]);
+    expect(data.adminScriptSrc).toBe('/admin/plugins/google-sheet/assets/sheet-sync-admin.js');
     const valueUpdates = calls.filter((call) => call.init?.method === 'PUT');
     expect(valueUpdates).toHaveLength(2);
     const guestBody = JSON.parse(String(valueUpdates[0].init?.body)) as { values: string[][] };
+    expect(guestBody.values[0]).not.toContain('page_type');
     expect(guestBody.values[0]).toContain('*mail_list');
     expect(guestBody.values[0]).toContain('@status');
     expect(guestBody.values[0]).toContain('.name|en');

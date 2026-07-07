@@ -1,7 +1,9 @@
 import { SIGNATURE_COLUMN, pageSignature } from './integrity';
 import type { CmsPage, CmsPageInput } from './types';
 
-const BASE_COLUMNS = ['id', 'page_type', 'name', 'slug', 'weight', 'start', 'end', 'timezone', 'page_id', 'updated_at'];
+const BASE_COLUMNS = ['id', 'name', 'slug', 'weight', 'start', 'end', 'timezone', 'page_id', 'updated_at'];
+const OMITTED_EXPORT_COLUMNS = new Set(['page_type']);
+const RESERVED_COLUMNS = new Set([...BASE_COLUMNS, 'page_type']);
 const READONLY_COLUMNS = new Set(['updated_at', SIGNATURE_COLUMN]);
 
 type FlatLect = Record<string, string>;
@@ -26,7 +28,7 @@ export function pagesToSheetValues(pages: CmsPage[], language: string, selectedC
 
 function columnsForRows(rows: Array<Record<string, string>>): string[] {
   const columns = [...BASE_COLUMNS];
-  const seen = new Set(columns);
+  const seen = new Set([...columns, ...OMITTED_EXPORT_COLUMNS]);
   for (const row of rows) {
     for (const column of Object.keys(row)) {
       if (!seen.has(column)) {
@@ -98,7 +100,7 @@ function buildRowUpdate(headers: string[], cells: string[], pageType: string, la
 
   const lectColumns: FlatLect = {};
   for (const [key, value] of Object.entries(record)) {
-    if (BASE_COLUMNS.includes(key) || READONLY_COLUMNS.has(key)) continue;
+    if (RESERVED_COLUMNS.has(key) || READONLY_COLUMNS.has(key)) continue;
     if (isLectColumn(key)) lectColumns[key] = value;
   }
 
