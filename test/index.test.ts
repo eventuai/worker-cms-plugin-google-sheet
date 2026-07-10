@@ -526,7 +526,11 @@ describe('admin sync', () => {
       value: 'https://docs.google.com/spreadsheets/d/sheet-123/edit',
     });
     expect(data.copyCode.label).toBe('Apps Script callback');
-    expect(data.copyCode.value).toContain("const CMS_PLUGIN_CALLBACK_URL = 'https://plugin.example/__plugin/sheets/callback';");
+    // The callback URL carries the minting tenant's ref so the shared callback
+    // endpoint can route the import even after more tenants are added.
+    expect(data.copyCode.value).toMatch(
+      /const CMS_PLUGIN_CALLBACK_URL = 'https:\/\/plugin\.example\/__plugin\/sheets\/callback\?t=[0-9a-f]{16}';/,
+    );
     expect(data.copyCode.value).toContain(`const CMS_PLUGIN_CALLBACK_TOKEN = '${await callbackToken('sheet-secret', 'sheet-123')}';`);
     expect(data.copyCode.value).not.toContain("'sheet-secret'");
     expect(data.table.headers).toEqual(['Page type', 'Fetched', 'Exported', 'Columns']);

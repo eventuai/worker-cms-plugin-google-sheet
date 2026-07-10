@@ -1,3 +1,4 @@
+import { requireTenant, soleTenant, tenantByRef, tenantClientEnv } from '@lionrockjs/worker-cms-plugin';
 import { CmsApiError, CmsClient, CmsNotConfiguredError } from './cms';
 import { GoogleSheetsClient, GoogleSheetsError, sheetTitleFor } from './google';
 import { SIGNATURE_COLUMN, callbackToken, hashIncludesSignature, pageHash, pageSignature, secureEquals } from './integrity';
@@ -13,7 +14,7 @@ const ADMIN_SCRIPT_ASSET = '/assets/sheet-sync-admin.js';
 const MAX_CALLBACK_ROWS = 200;
 
 export default {
-  async fetch(request: Request, env: PluginEnv): Promise<Response> {
+  async fetch(request: Request, baseEnv: PluginEnv): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -23,15 +24,18 @@ export default {
       });
     }
 
-    if (path === '/__plugin/manifest') return Response.json(manifest(env));
+    if (path === '/__plugin/manifest') return Response.json(manifest(baseEnv));
 
     if (path === '/__plugin/sheets/callback') {
-      return handleSheetCallback(request, env);
+      return handleSheetCallback(request, baseEnv, url);
     }
 
     if (path.startsWith('/__plugin/admin')) {
-      const forbidden = requirePluginSecret(request, env.PLUGIN_SECRET);
-      if (forbidden) return forbidden;
+      // Resolve the calling CMS's tenant; the admin handlers then run against
+      // a tenant-scoped env, binding every CMS call to that host only.
+      const tenant = await requireTenant(request, baseEnv);
+      if (tenant instanceof Response) return tenant;
+      const env = tenantClientEnv(baseEnv, tenant);
       try {
         return await handleAdmin(request, env, url);
       } catch (error) {
@@ -43,10 +47,20 @@ export default {
   },
 };
 
-async function handleSheetCallback(request: Request, env: PluginEnv): Promise<Response> {
+async function handleSheetCallback(request: Request, baseEnv: PluginEnv, url: URL): Promise<Response> {
   if (request.method !== 'POST') {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
+
+  // Multi-tenant: minted Apps Script callback URLs carry `?t=<tenant ref>`,
+  // which selects the tenant whose webhook secret verifies the token and
+  // whose CMS receives the import. A swapped ref fails token verification
+  // under the other tenant's secret. Legacy URLs (no ref) resolve while
+  // exactly one tenant is configured.
+  const ref = url.searchParams.get('t') ?? '';
+  const tenant = ref ? await tenantByRef(baseEnv, ref) : await soleTenant(baseEnv);
+  if (!tenant) return Response.json({ error: 'forbidden' }, { status: 403 });
+  const env = tenantClientEnv(baseEnv, tenant);
   if (!env.SHEET_WEBHOOK_SECRET) {
     return Response.json({ error: 'webhook_not_configured' }, { status: 500 });
   }
@@ -744,6 +758,7 @@ async function exportResultViewData(title: string, result: SyncResult, sync: Syn
     callbackToken: env.SHEET_WEBHOOK_SECRET
       ? await callbackToken(env.SHEET_WEBHOOK_SECRET, result.spreadsheetId)
       : 'YOUR_SHEET_CALLBACK_TOKEN',
+    tenantRef: env.CMS_TENANT_REF ?? '',
   });
   return {
     heading: title,
@@ -909,12 +924,6 @@ function clientView(title: string, viewPath: string, data: Record<string, unknow
   });
 }
 
-function requirePluginSecret(request: Request, secret: string | undefined): Response | null {
-  if (!secret) return new Response('server misconfigured', { status: 500, headers: { 'cache-control': 'no-store' } });
-  if (request.headers.get('x-plugin-secret') !== secret) return new Response('forbidden', { status: 403, headers: { 'cache-control': 'no-store' } });
-  return null;
-}
-
 // Header-only on purpose: a `?secret=` query parameter would end up in access
 // logs and Apps Script execution logs. The header carries the per-spreadsheet
 // callback token generated from SHEET_WEBHOOK_SECRET.
@@ -977,9 +986,11 @@ function esc(value: unknown): string {
 // plugin re-reads the sheet itself. The embedded credential is a token scoped
 // to this one spreadsheet (never the raw webhook secret), so it is safe in a
 // container-bound script that every sheet editor can open and read.
-function appsScriptTemplate(opts: { pluginHost: string; callbackToken: string }): string {
+function appsScriptTemplate(opts: { pluginHost: string; callbackToken: string; tenantRef?: string }): string {
   const host = opts.pluginHost.replace(/\/+$/, '') || 'https://YOUR_PLUGIN_HOST';
-  return `const CMS_PLUGIN_CALLBACK_URL = '${jsString(`${host}/__plugin/sheets/callback`)}';
+  // `?t=<ref>` scopes the callback to the minting tenant (see handleSheetCallback).
+  const callbackPath = `/__plugin/sheets/callback${opts.tenantRef ? `?t=${opts.tenantRef}` : ''}`;
+  return `const CMS_PLUGIN_CALLBACK_URL = '${jsString(`${host}${callbackPath}`)}';
 const CMS_PLUGIN_CALLBACK_TOKEN = '${jsString(opts.callbackToken)}';
 
 function onCmsSheetEdit(e) {

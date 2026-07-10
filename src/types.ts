@@ -1,6 +1,11 @@
 export interface PluginEnv {
   PLUGIN_SECRET?: string;
   CMS_URL?: string;
+  /** Multi-tenant registry: `tenant:<cms origin>` → TenantConfig JSON. When
+   *  unbound, CMS_URL + PLUGIN_SECRET form the single legacy tenant. */
+  TENANTS?: KVNamespace;
+  /** Set by tenantClientEnv() after tenant auth — scopes minted callback URLs. */
+  CMS_TENANT_REF?: string;
   SYNC_PAGE_TYPES?: string;
   DEFAULT_LANGUAGE?: string;
   GOOGLE_ACCESS_TOKEN?: string;

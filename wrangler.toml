@@ -26,3 +26,13 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL = "id-xcms-sheets-sync@xcms-500715.iam.gserviceacco
 #
 # Share the target spreadsheet with GOOGLE_SERVICE_ACCOUNT_EMAIL, or let the
 # plugin create a new spreadsheet owned by that service account.
+
+# ── Multi-tenant mode (several CMS hosts → this one plugin) ────────────────────
+# One record per connected CMS; per-tenant vars can override the Google
+# credentials and SHEET_WEBHOOK_SECRET (recommended — a per-tenant webhook
+# secret keeps callback tokens from ever verifying across tenants):
+#   wrangler kv key put --binding TENANTS "tenant:https://cms1.example.com" \
+#     '{"secret":"<32-byte hex>","vars":{"SHEET_WEBHOOK_SECRET":"<per-tenant secret>"}}'
+# [[kv_namespaces]]
+# binding = "TENANTS"
+# id = "<kv-id>"
