@@ -946,11 +946,14 @@ function parseCmsUser(header: string | null): CmsUser {
   }
 }
 
-// Page types declared to the CMS host for delegated read/write. Supports the
-// "*" wildcard, which asks the host to allow every page type it has approved
-// for this plugin.
+// Page types declared to the CMS host for delegated read/write. Defaults to
+// the "*" wildcard — one admin-approvable "all page types" grant per CMS, so
+// no worker variable is needed. Setting SYNC_PAGE_TYPES narrows the declared
+// list for installs that want per-type approvals instead of all-or-nothing
+// (approvals are granted against declared entries, so only declared types can
+// be individually approved).
 function declaredPageTypes(env: PluginEnv): string[] {
-  return parsePageTypes(env.SYNC_PAGE_TYPES ?? '') ?? [];
+  return parsePageTypes(env.SYNC_PAGE_TYPES ?? '') ?? ['*'];
 }
 
 // Concrete page types used to pre-fill the form and as the sync fallback. "*"

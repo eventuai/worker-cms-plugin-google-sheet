@@ -60,6 +60,13 @@ describe('manifest', () => {
     expect(manifest.contentTypes.readTypes).toEqual(['event', 'guest']);
     expect(manifest.contentTypes.writeTypes).toEqual(['event', 'guest']);
   });
+
+  it('defaults to the "*" wildcard declaration when SYNC_PAGE_TYPES is unset', async () => {
+    const response = await plugin.fetch(request('/__plugin/manifest'), env({ SYNC_PAGE_TYPES: undefined }));
+    const manifest = await response.json() as { contentTypes: { readTypes: string[]; writeTypes: string[] } };
+    expect(manifest.contentTypes.readTypes).toEqual(['*']);
+    expect(manifest.contentTypes.writeTypes).toEqual(['*']);
+  });
 });
 
 describe('sheet mapper', () => {
