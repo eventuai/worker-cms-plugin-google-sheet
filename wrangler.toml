@@ -1,11 +1,9 @@
 name = "worker-cms-plugin-google-sheet"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
 [vars]
-# Base URL of the CMS Worker, for the /__cms page read/write API.
-CMS_URL = "https://cms.eventuai.com"
 #
 # OPTIONAL — the manifest declares the "*" wildcard by default (one
 # admin-approvable "all page types" grant per CMS; approval is still required
@@ -37,4 +35,4 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL = "id-xcms-sheets-sync@xcms-500715.iam.gserviceacco
 #     '{"secret":"<32-byte hex>","vars":{"SHEET_WEBHOOK_SECRET":"<per-tenant secret>"}}'
 [[kv_namespaces]]
 binding = "TENANTS"
-id = "a2540f49b2a645f884c2ac89292e7bdd"
+id = "20f0995f7c234ee5991a296126f6568a"
