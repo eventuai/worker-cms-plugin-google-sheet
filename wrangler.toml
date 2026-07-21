@@ -35,7 +35,7 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL = "id-xcms-sheets-sync@xcms-500715.iam.gserviceacco
 # secret keeps callback tokens from ever verifying across tenants):
 #   wrangler kv key put --binding TENANTS "tenant:https://cms1.example.com" \
 #     '{"secret":"<32-byte hex>","vars":{"SHEET_WEBHOOK_SECRET":"<per-tenant secret>"}}'
-# [[kv_namespaces]]
-# binding = "TENANTS"
-# id = "REPLACE_WITH_ID_FROM_npm_run_kv_setup"
+[[kv_namespaces]]
+binding = "TENANTS"
+id = "93f056321faf42faa64fde6e09e50383"
 # preview_id = "REPLACE_WITH_ID_FROM_npm_run_kv_setup_preview"
